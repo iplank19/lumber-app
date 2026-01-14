@@ -44,7 +44,7 @@ d_rates = saved_config.get("rates", [0.00] * 6)
 for i in range(6):
     c1, c2 = st.sidebar.columns([1, 2])
     s = c1.text_input(f"St {i+1}", d_states[i] if i < len(d_states) else "", key=f"s{i}").upper().strip()
-    r = c2.number_input(f"Rate", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
+    r = c2.number_input(f"Rate {i+1}", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
     states_input.append(s); rates_input.append(r)
 
 rate_map = {k: v for k, v in zip(states_input, rates_input) if k}
@@ -65,7 +65,7 @@ target_city = st.sidebar.selectbox("Target for Quote", active_cities) if active_
 # --- CALCULATION ENGINE ---
 def get_miles(origin, destination):
     if not origin or not destination: return None
-    time.sleep(1.1) # Compliance with OpenStreetMap
+    time.sleep(1.1) 
     try:
         headers = {'User-Agent': 'lumber_hub_cloud_v1'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
@@ -101,38 +101,7 @@ def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
         return f"QUOTE: {city.upper()}\n{header}\n{'-'*60}\n" + "\n".join(rows)
     return None
 
-# --- SAVE ACTION ---
-if st.sidebar.button("☁️ SAVE ALL TO CLOUD"):
-    # Fix: Reference df_master and df_spec directly instead of st.session_state
-    config_bundle = {
-        "states": states_input, 
-        "rates": rates_input, 
-        "sh_threshold": sh_threshold, 
-        "sh_floor": sh_floor, 
-        "uni_div": uni_div, 
-        "msr_div": msr_div,
-        "round_to": round_val, 
-        "cities_list": cities_list,
-        "master_data": df_master.to_dict('records'),
-        "spec_data": df_spec.to_dict('records')
-    }
-    
-    # Standard Cloud Update Logic
-    all_profiles = conn.read(worksheet="Profiles")
-    new_row = pd.DataFrame([{"profile_name": current_profile, "config_json": json.dumps(config_bundle)}])
-    
-    # Filter out the old version of the profile and add the new one
-    if not all_profiles.empty:
-        updated_profiles = pd.concat([all_profiles[all_profiles["profile_name"] != current_profile], new_row])
-    else:
-        updated_profiles = new_row
-        
-    conn.update(worksheet="Profiles", data=updated_profiles)
-    st.sidebar.success("Cloud Synced!")
-    st.cache_data.clear()
-    time.sleep(1); st.rerun()
-
-# --- TABS ---
+# --- TABS (Defined BEFORE Save Action) ---
 tab_pricing, tab_customers = st.tabs(["🌲 Pricing Engine", "👥 Cloud CRM"])
 
 with tab_pricing:
@@ -140,10 +109,10 @@ with tab_pricing:
     col_a, col_b = st.columns(2)
     with col_a:
         m_data = saved_config.get("master_data", [])
-        df_master = st.data_editor(pd.DataFrame(m_data) if m_data else pd.DataFrame({"Product": [""]*15, "FOB Price": [0.0]*15, "Origin": [""]*15, "Availability": ["Prompt"]*15, "Ship Time": ["Prompt"]*15}), use_container_width=True, num_rows="dynamic", key="m_edit")
+        df_master = st.data_editor(pd.DataFrame(m_data) if m_data else pd.DataFrame({"Product": [""]*15, "FOB Price": [0.0]*15, "Origin": [""]*15, "Availability": ["Prompt"]*15, "Ship Time": ["Prompt"]*15}), use_container_width=True, num_rows="dynamic", key="m_edit_ui")
     with col_b:
         s_data = saved_config.get("spec_data", [])
-        df_spec = st.data_editor(pd.DataFrame(s_data) if s_data else pd.DataFrame({"Product": [""]*10, "FOB Price": [0.0]*10, "Origin": [""]*10, "Availability": ["Prompt"]*10, "Ship Time": ["Prompt"]*10}), use_container_width=True, num_rows="dynamic", key="s_edit")
+        df_spec = st.data_editor(pd.DataFrame(s_data) if s_data else pd.DataFrame({"Product": [""]*10, "FOB Price": [0.0]*10, "Origin": [""]*10, "Availability": ["Prompt"]*10, "Ship Time": ["Prompt"]*10}), use_container_width=True, num_rows="dynamic", key="s_edit_ui")
 
     st.markdown("---")
     inc_m = st.toggle("Include Standards", value=True)
@@ -177,7 +146,7 @@ with tab_customers:
                         st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN EMAIL CLIENT</div></a>', unsafe_allow_html=True)
 
     with col1:
-        edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]), use_container_width=True, num_rows="dynamic", key="crm_edit")
+        edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]), use_container_width=True, num_rows="dynamic", key="crm_edit_ui")
         if st.button("💾 SAVE CRM"):
             edited_crm['profile_name'] = current_profile
             others = crm_all[crm_all['profile_name'] != current_profile]
@@ -186,3 +155,23 @@ with tab_customers:
             st.success("CRM Synced!")
             st.cache_data.clear()
             time.sleep(1); st.rerun()
+
+# --- SAVE ACTION (Now at the bottom, so it can see df_master and df_spec) ---
+st.sidebar.markdown("---")
+if st.sidebar.button("☁️ SAVE PROFILE TO CLOUD"):
+    config_bundle = {
+        "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
+        "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
+        "round_to": round_val, "cities_list": cities_list,
+        "master_data": df_master.to_dict('records'),
+        "spec_data": df_spec.to_dict('records')
+    }
+    new_row = pd.DataFrame([{"profile_name": current_profile, "config_json": json.dumps(config_bundle)}])
+    if not df_profiles.empty:
+        updated_profiles = pd.concat([df_profiles[df_profiles["profile_name"] != current_profile], new_row])
+    else:
+        updated_profiles = new_row
+    conn.update(worksheet="Profiles", data=updated_profiles)
+    st.sidebar.success("Cloud Profile Saved!")
+    st.cache_data.clear()
+    time.sleep(1); st.rerun()
