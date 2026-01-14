@@ -103,15 +103,30 @@ def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
 
 # --- SAVE ACTION ---
 if st.sidebar.button("☁️ SAVE ALL TO CLOUD"):
+    # Fix: Reference df_master and df_spec directly instead of st.session_state
     config_bundle = {
-        "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
-        "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
-        "round_to": round_val, "cities_list": cities_list,
-        "master_data": st.session_state.m_edit.to_dict('records'),
-        "spec_data": st.session_state.s_edit.to_dict('records')
+        "states": states_input, 
+        "rates": rates_input, 
+        "sh_threshold": sh_threshold, 
+        "sh_floor": sh_floor, 
+        "uni_div": uni_div, 
+        "msr_div": msr_div,
+        "round_to": round_val, 
+        "cities_list": cities_list,
+        "master_data": df_master.to_dict('records'),
+        "spec_data": df_spec.to_dict('records')
     }
+    
+    # Standard Cloud Update Logic
+    all_profiles = conn.read(worksheet="Profiles")
     new_row = pd.DataFrame([{"profile_name": current_profile, "config_json": json.dumps(config_bundle)}])
-    updated_profiles = pd.concat([df_profiles[df_profiles["profile_name"] != current_profile], new_row])
+    
+    # Filter out the old version of the profile and add the new one
+    if not all_profiles.empty:
+        updated_profiles = pd.concat([all_profiles[all_profiles["profile_name"] != current_profile], new_row])
+    else:
+        updated_profiles = new_row
+        
     conn.update(worksheet="Profiles", data=updated_profiles)
     st.sidebar.success("Cloud Synced!")
     st.cache_data.clear()
