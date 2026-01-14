@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Smart Cloud Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Ultimate Cloud", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -57,7 +57,7 @@ d_rates = saved_config.get("rates", [0.00] * 6)
 for i in range(6):
     c1, c2 = st.sidebar.columns([1, 2])
     s = c1.text_input(f"St {i+1}", d_states[i] if i < len(d_states) else "", key=f"s{i}").upper().strip()
-    r = c2.number_input(f"Rate", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
+    r = c2.number_input(f"Rate {i+1}", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
     states_input.append(s); rates_input.append(r)
 
 rate_map = {k: v for k, v in zip(states_input, rates_input) if k}
@@ -89,7 +89,7 @@ def get_miles(origin, destination):
     # If not in cache, ping API
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_smart_cache_v2'}
+        headers = {'User-Agent': 'lumber_hub_smart_cache_v3'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -100,7 +100,7 @@ def get_miles(origin, destination):
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Mileage")
         ws.append_row([lane_key, miles])
-        st.cache_data.clear() # Clear cache so next calc sees the new lane
+        st.cache_data.clear() 
         return miles
     except: return None
 
@@ -151,7 +151,7 @@ with tab_pricing:
     if st.button(f"Generate Single Quote", type="primary"):
         if not target_city: st.error("Add cities in the sidebar first.")
         else:
-            with st.spinner(f"Routing to {target_city}..."):
+            with st.spinner(f"Pricing {target_city}..."):
                 res = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
                 if res: st.text_area("Single Output", value=res, height=300)
 
@@ -188,15 +188,25 @@ with tab_customers:
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("🚀 PREPARE DRAFT"):
-                    with st.spinner("Calculating..."):
+                    with st.spinner("Pricing..."):
                         q = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
                         if q and "QUOTE:" in q:
                             mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q)}"
-                            st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                            st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN EMAIL CLIENT</div></a>', unsafe_allow_html=True)
                         else: st.error("No valid rates for this location.")
 
     with col_dir:
-        edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]), use_container_width=True, num_rows="dynamic", key="crm_edit_ui")
+        # CLEANED VIEW: Hiding internal columns
+        edited_crm = st.data_editor(
+            profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]),
+            use_container_width=True, 
+            num_rows="dynamic", 
+            key="crm_edit_ui",
+            column_config={
+                "profile_name": None,
+                "email": None
+            }
+        )
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
@@ -242,7 +252,7 @@ if col_del.button("🗑️ DELETE"):
             st.sidebar.warning("Deleted.")
             st.cache_data.clear(); time.sleep(1); st.rerun()
 
-# Show Mileage Stats
+# Mileage Stats
 try:
     m_count = len(conn.read(worksheet="Mileage"))
     st.sidebar.caption(f"📍 Mileage Atlas: {m_count} lanes cached")
