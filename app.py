@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Ultimate Cloud", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Secure Cloud", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -35,17 +35,36 @@ def get_all_profiles():
 df_profiles = get_all_profiles()
 profile_list = df_profiles["profile_name"].unique().tolist() if not df_profiles.empty else ["Default"]
 
-# --- SIDEBAR: PROFILE MANAGEMENT ---
+# --- SIDEBAR: PROFILE & SECURITY ---
 st.sidebar.header("📁 Cloud Profile Manager")
 selected_profile = st.sidebar.selectbox("Select Active Profile", profile_list)
 new_profile = st.sidebar.text_input("OR Create New (Enter Name)")
 current_profile = new_profile if new_profile else selected_profile
 
+# Security PIN Logic
+user_pin = st.sidebar.text_input("Enter 4-Digit PIN", type="password", help="Required to unlock or save this profile")
+
 # Load Config Data
 saved_config = {}
+is_locked = True
+
 if current_profile in df_profiles["profile_name"].values:
     config_str = df_profiles[df_profiles["profile_name"] == current_profile]["config_json"].values[0]
     saved_config = json.loads(config_str)
+    correct_pin = str(saved_config.get("pin", ""))
+    
+    # If no PIN exists (old profiles), or PIN matches, unlock
+    if not correct_pin or user_pin == correct_pin:
+        is_locked = False
+    else:
+        is_locked = True
+else:
+    # It's a brand new profile
+    is_locked = False
+
+if is_locked:
+    st.error("🔒 Profile Locked. Please enter the correct PIN in the sidebar.")
+    st.stop() # Stops the rest of the app from rendering
 
 # --- SIDEBAR: 1. FREIGHT RATES ---
 st.sidebar.markdown("---")
@@ -78,21 +97,18 @@ active_cities = [c.strip() for c in cities_list_raw.split("\n") if c.strip()]
 def get_miles(origin, destination):
     if not origin or not destination: return None
     lane_key = f"{origin.strip().upper()} to {destination.strip().upper()}"
-    
     try:
         mileage_df = conn.read(worksheet="Mileage")
         if not mileage_df.empty and lane_key in mileage_df['lane_key'].values:
             return float(mileage_df[mileage_df['lane_key'] == lane_key]['miles'].values[0])
     except: pass
-
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_smart_cache_v4'}
+        headers = {'User-Agent': 'lumber_hub_secure_v1'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
         miles = round(requests.get(r_url).json()['routes'][0]['distance'] * 0.000621371, 2)
-        
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Mileage")
@@ -171,11 +187,8 @@ with tab_bulk:
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
-    try: 
-        crm_all = conn.read(worksheet="CRM")
-    except: 
-        crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"])
-    
+    try: crm_all = conn.read(worksheet="CRM")
+    except: crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"])
     profile_crm = crm_all[crm_all['profile_name'] == current_profile]
     
     col_dir, col_prep = st.columns([2, 1])
@@ -197,15 +210,9 @@ with tab_customers:
     with col_dir:
         edited_crm = st.data_editor(
             profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"]),
-            use_container_width=True, 
-            num_rows="dynamic", 
-            key="crm_edit_ui",
+            use_container_width=True, num_rows="dynamic", key="crm_edit_ui",
             column_order=("Company Name", "Location", "Notes", "Buyer Email"),
-            column_config={
-                "profile_name": None,
-                "email": None,
-                "Buyer Email": st.column_config.TextColumn("Buyer Email", help="Full contact email", default="")
-            }
+            column_config={"profile_name": None, "email": None, "Buyer Email": st.column_config.TextColumn("Buyer Email")}
         )
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
@@ -223,22 +230,26 @@ st.sidebar.markdown("---")
 col_save, col_del = st.sidebar.columns(2)
 
 if col_save.button("☁️ SAVE"):
-    gc = get_gspread_client()
-    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-    ws = sh.worksheet("Profiles")
-    config = {
-        "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
-        "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
-        "round_to": round_val, "cities_list": cities_list_raw,
-        "master_data": df_master.fillna("").to_dict('records'), 
-        "spec_data": df_spec.fillna("").to_dict('records')
-    }
-    profiles_data = ws.get_all_records()
-    found_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
-    if found_row != -1: ws.update_cell(found_row, 2, json.dumps(config))
-    else: ws.append_row([current_profile, json.dumps(config)])
-    st.sidebar.success(f"Saved: {current_profile}")
-    st.cache_data.clear(); time.sleep(1); st.rerun()
+    if len(user_pin) < 4:
+        st.sidebar.error("Please set a 4-digit PIN before saving.")
+    else:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        ws = sh.worksheet("Profiles")
+        config = {
+            "pin": user_pin, # Save the PIN into the config bundle
+            "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
+            "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
+            "round_to": round_val, "cities_list": cities_list_raw,
+            "master_data": df_master.fillna("").to_dict('records'), 
+            "spec_data": df_spec.fillna("").to_dict('records')
+        }
+        profiles_data = ws.get_all_records()
+        found_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
+        if found_row != -1: ws.update_cell(found_row, 2, json.dumps(config))
+        else: ws.append_row([current_profile, json.dumps(config)])
+        st.sidebar.success(f"Saved: {current_profile}")
+        st.cache_data.clear(); time.sleep(1); st.rerun()
 
 confirm_del = st.sidebar.checkbox("Confirm Delete")
 if col_del.button("🗑️ DELETE"):
