@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub Cloud Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Smart Cloud Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -57,7 +57,7 @@ d_rates = saved_config.get("rates", [0.00] * 6)
 for i in range(6):
     c1, c2 = st.sidebar.columns([1, 2])
     s = c1.text_input(f"St {i+1}", d_states[i] if i < len(d_states) else "", key=f"s{i}").upper().strip()
-    r = c2.number_input(f"Rate {i+1}", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
+    r = c2.number_input(f"Rate", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
     states_input.append(s); rates_input.append(r)
 
 rate_map = {k: v for k, v in zip(states_input, rates_input) if k}
@@ -73,18 +73,35 @@ st.sidebar.markdown("---")
 st.sidebar.header("2. Cities")
 cities_list_raw = st.sidebar.text_area("City List (One per line)", value=saved_config.get("cities_list", ""), height=120)
 active_cities = [c.strip() for c in cities_list_raw.split("\n") if c.strip()]
-target_city = st.sidebar.selectbox("Target for Quote", active_cities) if active_cities else None
 
-# --- ENGINE ---
+# --- SMART MILEAGE ENGINE ---
 def get_miles(origin, destination):
     if not origin or not destination: return None
+    lane_key = f"{origin.strip().upper()} to {destination.strip().upper()}"
+    
+    # Check Cloud Cache first
+    try:
+        mileage_df = conn.read(worksheet="Mileage")
+        if not mileage_df.empty and lane_key in mileage_df['lane_key'].values:
+            return float(mileage_df[mileage_df['lane_key'] == lane_key]['miles'].values[0])
+    except: pass
+
+    # If not in cache, ping API
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_cloud_v3'}
+        headers = {'User-Agent': 'lumber_hub_smart_cache_v2'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
-        return requests.get(r_url).json()['routes'][0]['distance'] * 0.000621371
+        miles = round(requests.get(r_url).json()['routes'][0]['distance'] * 0.000621371, 2)
+        
+        # Save to Cloud Atlas
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        ws = sh.worksheet("Mileage")
+        ws.append_row([lane_key, miles])
+        st.cache_data.clear() # Clear cache so next calc sees the new lane
+        return miles
     except: return None
 
 def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
@@ -114,7 +131,7 @@ def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
     return None
 
 # --- UI TABS ---
-tab_pricing, tab_customers = st.tabs(["🌲 Pricing Engine", "👥 Cloud CRM"])
+tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bulk Market", "👥 Cloud CRM"])
 
 with tab_pricing:
     st.header(f"Workspace: {current_profile}")
@@ -129,18 +146,37 @@ with tab_pricing:
     st.markdown("---")
     inc_m = st.toggle("Include Standards", value=True)
     inc_s = st.toggle("Include Specialties", value=True)
+    target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
     
-    if st.button(f"Generate Quote for {target_city}", type="primary"):
-        with st.spinner("Calculating Delivered Prices..."):
-            res = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
-            if res: st.text_area("Output", value=res, height=300)
+    if st.button(f"Generate Single Quote", type="primary"):
+        if not target_city: st.error("Add cities in the sidebar first.")
+        else:
+            with st.spinner(f"Routing to {target_city}..."):
+                res = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if res: st.text_area("Single Output", value=res, height=300)
+
+with tab_bulk:
+    st.header("Bulk Distribution Generator")
+    if st.button("🚀 RUN FULL MARKET SHEET"):
+        if not active_cities: st.error("City List is empty.")
+        else:
+            bulk_output = []
+            progress = st.progress(0)
+            for i, city in enumerate(active_cities):
+                st.write(f"Calculating {city}...")
+                q = run_calculation(city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if q: bulk_output.append(q + "\n\n")
+                progress.progress((i+1)/len(active_cities))
+            
+            if bulk_output:
+                final_bulk = "".join(bulk_output)
+                st.text_area("Full Market Output", value=final_bulk, height=500)
+                st.download_button("Download Market Sheet", final_bulk, file_name="Full_Quote.txt")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
-    try:
-        crm_all = conn.read(worksheet="CRM")
-    except:
-        crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"])
+    try: crm_all = conn.read(worksheet="CRM")
+    except: crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"])
     
     profile_crm = crm_all[crm_all['profile_name'] == current_profile]
     
@@ -151,11 +187,13 @@ with tab_customers:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
-                if st.button("🚀 PREPARE EMAIL"):
-                    with st.spinner("Pricing..."):
+                if st.button("🚀 PREPARE DRAFT"):
+                    with st.spinner("Calculating..."):
                         q = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
-                        mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q)}"
-                        st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN EMAIL CLIENT</div></a>', unsafe_allow_html=True)
+                        if q and "QUOTE:" in q:
+                            mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q)}"
+                            st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                        else: st.error("No valid rates for this location.")
 
     with col_dir:
         edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]), use_container_width=True, num_rows="dynamic", key="crm_edit_ui")
@@ -163,76 +201,49 @@ with tab_customers:
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
             ws = sh.worksheet("CRM")
-            
-            # Cleaning NaN values
             edited_crm['profile_name'] = current_profile
-            cleaned_edited = edited_crm.fillna("")
-            others = crm_all[crm_all['profile_name'] != current_profile].fillna("")
-            
-            final_crm = pd.concat([others, cleaned_edited], ignore_index=True)
+            final_crm = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).fillna("")
             ws.clear()
-            # Convert to str to avoid JSON errors
-            data_to_save = [final_crm.columns.values.tolist()] + final_crm.astype(str).values.tolist()
-            ws.update(data_to_save)
+            ws.update([final_crm.columns.values.tolist()] + final_crm.astype(str).values.tolist())
             st.success("CRM Synced!")
-            st.cache_data.clear()
-            time.sleep(1); st.rerun()
+            st.cache_data.clear(); time.sleep(1); st.rerun()
 
-# --- SIDEBAR: SAVE & DELETE LOGIC ---
+# --- SIDEBAR: CLOUD MANAGEMENT ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("Cloud Management")
 col_save, col_del = st.sidebar.columns(2)
 
-# SAVE PROFILE
 if col_save.button("☁️ SAVE"):
     gc = get_gspread_client()
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
-    
-    # Cleaning table data before bundling into JSON
-    config_bundle = {
+    config = {
         "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
         "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
         "round_to": round_val, "cities_list": cities_list_raw,
         "master_data": df_master.fillna("").to_dict('records'), 
         "spec_data": df_spec.fillna("").to_dict('records')
     }
-    
     profiles_data = ws.get_all_records()
-    found_row = -1
-    for i, row in enumerate(profiles_data):
-        if row['profile_name'] == current_profile:
-            found_row = i + 2 
-            break
-    
-    if found_row != -1:
-        ws.update_cell(found_row, 2, json.dumps(config_bundle))
-    else:
-        ws.append_row([current_profile, json.dumps(config_bundle)])
-    
+    found_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
+    if found_row != -1: ws.update_cell(found_row, 2, json.dumps(config))
+    else: ws.append_row([current_profile, json.dumps(config)])
     st.sidebar.success(f"Saved: {current_profile}")
-    st.cache_data.clear()
-    time.sleep(1); st.rerun()
+    st.cache_data.clear(); time.sleep(1); st.rerun()
 
-# DELETE PROFILE
-confirm_del = st.sidebar.checkbox("Confirm Delete Action")
+confirm_del = st.sidebar.checkbox("Confirm Delete")
 if col_del.button("🗑️ DELETE"):
-    if not confirm_del:
-        st.sidebar.warning("Check box to confirm.")
-    elif current_profile == "Default":
-        st.sidebar.error("Cannot delete Default.")
-    else:
+    if confirm_del and current_profile != "Default":
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Profiles")
-        try:
-            cell = ws.find(current_profile)
-            if cell:
-                ws.delete_rows(cell.row)
-                st.sidebar.warning(f"Deleted: {current_profile}")
-                st.cache_data.clear()
-                time.sleep(1); st.rerun()
-            else:
-                st.sidebar.error("Not found.")
-        except:
-            st.sidebar.error("Error.")
+        cell = ws.find(current_profile)
+        if cell:
+            ws.delete_rows(cell.row)
+            st.sidebar.warning("Deleted.")
+            st.cache_data.clear(); time.sleep(1); st.rerun()
+
+# Show Mileage Stats
+try:
+    m_count = len(conn.read(worksheet="Mileage"))
+    st.sidebar.caption(f"📍 Mileage Atlas: {m_count} lanes cached")
+except: pass
