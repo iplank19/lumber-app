@@ -80,7 +80,7 @@ def get_miles(origin, destination):
     if not origin or not destination: return None
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_cloud_final'}
+        headers = {'User-Agent': 'lumber_hub_cloud_v3'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -131,7 +131,7 @@ with tab_pricing:
     inc_s = st.toggle("Include Specialties", value=True)
     
     if st.button(f"Generate Quote for {target_city}", type="primary"):
-        with st.spinner("Calculating..."):
+        with st.spinner("Calculating Delivered Prices..."):
             res = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
             if res: st.text_area("Output", value=res, height=300)
 
@@ -144,8 +144,8 @@ with tab_customers:
     
     profile_crm = crm_all[crm_all['profile_name'] == current_profile]
     
-    col1, col2 = st.columns([2, 1])
-    with col2:
+    col_dir, col_prep = st.columns([2, 1])
+    with col_prep:
         st.subheader("📬 Quick Email")
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
@@ -157,22 +157,28 @@ with tab_customers:
                         mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q)}"
                         st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN EMAIL CLIENT</div></a>', unsafe_allow_html=True)
 
-    with col1:
+    with col_dir:
         edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Buyer Email", "Location", "Notes"]), use_container_width=True, num_rows="dynamic", key="crm_edit_ui")
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
             ws = sh.worksheet("CRM")
+            
+            # Cleaning NaN values
             edited_crm['profile_name'] = current_profile
-            others = crm_all[crm_all['profile_name'] != current_profile]
-            final_crm = pd.concat([others, edited_crm], ignore_index=True)
+            cleaned_edited = edited_crm.fillna("")
+            others = crm_all[crm_all['profile_name'] != current_profile].fillna("")
+            
+            final_crm = pd.concat([others, cleaned_edited], ignore_index=True)
             ws.clear()
-            ws.update([final_crm.columns.values.tolist()] + final_crm.values.tolist())
+            # Convert to str to avoid JSON errors
+            data_to_save = [final_crm.columns.values.tolist()] + final_crm.astype(str).values.tolist()
+            ws.update(data_to_save)
             st.success("CRM Synced!")
             st.cache_data.clear()
             time.sleep(1); st.rerun()
 
-# --- SIDEBAR: SAVE & DELETE LOGIC (AT THE VERY BOTTOM) ---
+# --- SIDEBAR: SAVE & DELETE LOGIC ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Cloud Management")
 col_save, col_del = st.sidebar.columns(2)
@@ -183,11 +189,13 @@ if col_save.button("☁️ SAVE"):
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
     
+    # Cleaning table data before bundling into JSON
     config_bundle = {
         "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
         "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
         "round_to": round_val, "cities_list": cities_list_raw,
-        "master_data": df_master.to_dict('records'), "spec_data": df_spec.to_dict('records')
+        "master_data": df_master.fillna("").to_dict('records'), 
+        "spec_data": df_spec.fillna("").to_dict('records')
     }
     
     profiles_data = ws.get_all_records()
@@ -206,13 +214,13 @@ if col_save.button("☁️ SAVE"):
     st.cache_data.clear()
     time.sleep(1); st.rerun()
 
-# DELETE PROFILE WITH CONFIRMATION
+# DELETE PROFILE
 confirm_del = st.sidebar.checkbox("Confirm Delete Action")
 if col_del.button("🗑️ DELETE"):
     if not confirm_del:
-        st.sidebar.warning("Please check the confirmation box first.")
+        st.sidebar.warning("Check box to confirm.")
     elif current_profile == "Default":
-        st.sidebar.error("Cannot delete 'Default' profile.")
+        st.sidebar.error("Cannot delete Default.")
     else:
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
@@ -225,6 +233,6 @@ if col_del.button("🗑️ DELETE"):
                 st.cache_data.clear()
                 time.sleep(1); st.rerun()
             else:
-                st.sidebar.error("Profile not found.")
+                st.sidebar.error("Not found.")
         except:
-            st.sidebar.error("Cloud access error.")
+            st.sidebar.error("Error.")
