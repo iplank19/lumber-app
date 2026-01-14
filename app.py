@@ -35,9 +35,10 @@ def get_all_profiles():
 df_profiles = get_all_profiles()
 profile_list = df_profiles["profile_name"].unique().tolist() if not df_profiles.empty else ["Default"]
 
+# --- SIDEBAR: PROFILE MANAGEMENT ---
 st.sidebar.header("📁 Cloud Profile Manager")
 selected_profile = st.sidebar.selectbox("Select Active Profile", profile_list)
-new_profile = st.sidebar.text_input("OR Create New (Blank)")
+new_profile = st.sidebar.text_input("OR Create New (Enter Name)")
 current_profile = new_profile if new_profile else selected_profile
 
 # Load Config Data
@@ -46,7 +47,7 @@ if current_profile in df_profiles["profile_name"].values:
     config_str = df_profiles[df_profiles["profile_name"] == current_profile]["config_json"].values[0]
     saved_config = json.loads(config_str)
 
-# --- SIDEBAR: 1. PRICING RATES (6 SLOTS) ---
+# --- SIDEBAR: 1. FREIGHT RATES ---
 st.sidebar.markdown("---")
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
@@ -56,7 +57,7 @@ d_rates = saved_config.get("rates", [0.00] * 6)
 for i in range(6):
     c1, c2 = st.sidebar.columns([1, 2])
     s = c1.text_input(f"St {i+1}", d_states[i] if i < len(d_states) else "", key=f"s{i}").upper().strip()
-    r = c2.number_input(f"Rate", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
+    r = c2.number_input(f"Rate {i+1}", value=float(d_rates[i]) if i < len(d_rates) else 0.00, key=f"r{i}")
     states_input.append(s); rates_input.append(r)
 
 rate_map = {k: v for k, v in zip(states_input, rates_input) if k}
@@ -79,7 +80,7 @@ def get_miles(origin, destination):
     if not origin or not destination: return None
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_cloud_v3'}
+        headers = {'User-Agent': 'lumber_hub_cloud_final'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -171,9 +172,13 @@ with tab_customers:
             st.cache_data.clear()
             time.sleep(1); st.rerun()
 
-# --- SAVE PROFILE (AT BOTTOM) ---
+# --- SIDEBAR: SAVE & DELETE LOGIC (AT THE VERY BOTTOM) ---
 st.sidebar.markdown("---")
-if st.sidebar.button("☁️ SAVE PROFILE TO CLOUD"):
+st.sidebar.subheader("Cloud Management")
+col_save, col_del = st.sidebar.columns(2)
+
+# SAVE PROFILE
+if col_save.button("☁️ SAVE"):
     gc = get_gspread_client()
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
@@ -185,12 +190,11 @@ if st.sidebar.button("☁️ SAVE PROFILE TO CLOUD"):
         "master_data": df_master.to_dict('records'), "spec_data": df_spec.to_dict('records')
     }
     
-    # Logic to overwrite existing or append new
     profiles_data = ws.get_all_records()
     found_row = -1
     for i, row in enumerate(profiles_data):
         if row['profile_name'] == current_profile:
-            found_row = i + 2 # +2 for header and 0-indexing
+            found_row = i + 2 
             break
     
     if found_row != -1:
@@ -198,6 +202,29 @@ if st.sidebar.button("☁️ SAVE PROFILE TO CLOUD"):
     else:
         ws.append_row([current_profile, json.dumps(config_bundle)])
     
-    st.sidebar.success("Cloud Profile Saved!")
+    st.sidebar.success(f"Saved: {current_profile}")
     st.cache_data.clear()
     time.sleep(1); st.rerun()
+
+# DELETE PROFILE WITH CONFIRMATION
+confirm_del = st.sidebar.checkbox("Confirm Delete Action")
+if col_del.button("🗑️ DELETE"):
+    if not confirm_del:
+        st.sidebar.warning("Please check the confirmation box first.")
+    elif current_profile == "Default":
+        st.sidebar.error("Cannot delete 'Default' profile.")
+    else:
+        gc = get_gspread_client()
+        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        ws = sh.worksheet("Profiles")
+        try:
+            cell = ws.find(current_profile)
+            if cell:
+                ws.delete_rows(cell.row)
+                st.sidebar.warning(f"Deleted: {current_profile}")
+                st.cache_data.clear()
+                time.sleep(1); st.rerun()
+            else:
+                st.sidebar.error("Profile not found.")
+        except:
+            st.sidebar.error("Cloud access error.")
