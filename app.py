@@ -26,9 +26,7 @@ def get_gspread_client():
 def get_all_profiles():
     try:
         df = conn.read(worksheet="Profiles")
-        if df.empty or "profile_name" not in df.columns:
-            return pd.DataFrame(columns=["profile_name", "config_json"])
-        return df
+        return df if not df.empty else pd.DataFrame(columns=["profile_name", "config_json"])
     except:
         return pd.DataFrame(columns=["profile_name", "config_json"])
 
@@ -59,7 +57,7 @@ if is_locked:
     st.error("🔒 Profile Locked. Enter PIN in sidebar.")
     st.stop()
 
-# --- SIDEBAR: FREIGHT & SETTINGS ---
+# --- SIDEBAR: SETTINGS ---
 st.sidebar.markdown("---")
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
@@ -107,7 +105,7 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- UPDATED CALC ENGINE (FOR OUTLOOK COMPATIBILITY) ---
+# --- FINAL VISUAL CALCULATION ENGINE ---
 def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, return_df=False):
     combined_list = []
     if inc_m: combined_list.append(df_master)
@@ -135,7 +133,7 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, retur
     res_df = pd.DataFrame(calc_rows)
     if return_df: return res_df
     
-    # FORMAT: Markdown table (preserves columns better in most apps)
+    # Return formatted Markdown for the display
     return f"### Quote: {city.upper()}\n\n" + res_df.to_markdown(index=False)
 
 # --- UI TABS ---
@@ -162,9 +160,8 @@ with tab_pricing:
             with st.spinner(f"Pricing {target_city}..."):
                 res_markdown = run_calculation(target_city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
                 if res_markdown: 
-                    st.markdown(res_markdown)
-                    st.info("💡 Copy the block below and paste into Outlook. Outlook will automatically align the columns.")
-                    st.code(res_markdown, language="markdown")
+                    st.markdown(res_markdown) # Shows the pretty visual table
+                    st.code(res_markdown, language="markdown") # Copyable block
 
 with tab_bulk:
     st.header("Bulk Distribution Generator")
@@ -174,7 +171,6 @@ with tab_bulk:
             bulk_output = []
             progress = st.progress(0)
             for i, city in enumerate(active_cities):
-                st.write(f"Calculating {city}...")
                 q_md = run_calculation(city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
                 if q_md: bulk_output.append(q_md + "\n\n---\n\n")
                 progress.progress((i+1)/len(active_cities))
@@ -201,7 +197,7 @@ with tab_customers:
                         q_md = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True)
                         if q_md:
                             email_addr = str(c_row.get('Buyer Email', ''))
-                            # URL encoding the markdown for mailto
+                            # Mailto links accept Markdown, and Outlook will often auto-format it
                             mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q_md)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
@@ -223,7 +219,7 @@ with tab_customers:
             st.success("CRM Synced!")
             st.cache_data.clear(); time.sleep(1); st.rerun()
 
-# --- SIDEBAR: SAVE & DELETE ---
+# --- SIDEBAR: CLOUD MANAGEMENT ---
 st.sidebar.markdown("---")
 col_save, col_del = st.sidebar.columns(2)
 if col_save.button("☁️ SAVE"):
