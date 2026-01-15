@@ -41,10 +41,8 @@ selected_profile = st.sidebar.selectbox("Select Active Profile", profile_list)
 new_profile = st.sidebar.text_input("OR Create New (Enter Name)")
 current_profile = new_profile if new_profile else selected_profile
 
-# Security PIN Logic
-user_pin = st.sidebar.text_input("Enter 4-Digit PIN", type="password", help="Required to unlock or save this profile")
+user_pin = st.sidebar.text_input("Enter 4-Digit PIN", type="password")
 
-# Load Config Data
 saved_config = {}
 is_locked = True
 
@@ -52,19 +50,14 @@ if current_profile in df_profiles["profile_name"].values:
     config_str = df_profiles[df_profiles["profile_name"] == current_profile]["config_json"].values[0]
     saved_config = json.loads(config_str)
     correct_pin = str(saved_config.get("pin", ""))
-    
-    # If no PIN exists (old profiles), or PIN matches, unlock
     if not correct_pin or user_pin == correct_pin:
         is_locked = False
-    else:
-        is_locked = True
 else:
-    # It's a brand new profile
     is_locked = False
 
 if is_locked:
     st.error("🔒 Profile Locked. Please enter the correct PIN in the sidebar.")
-    st.stop() # Stops the rest of the app from rendering
+    st.stop()
 
 # --- SIDEBAR: 1. FREIGHT RATES ---
 st.sidebar.markdown("---")
@@ -80,17 +73,14 @@ for i in range(6):
     states_input.append(s); rates_input.append(r)
 
 rate_map = {k: v for k, v in zip(states_input, rates_input) if k}
-
 sh_threshold = st.sidebar.number_input("Short Haul Limit", value=float(saved_config.get("sh_threshold", 200)))
 sh_floor = st.sidebar.number_input("Short Haul Floor ($)", value=float(saved_config.get("sh_floor", 700)))
 uni_div = st.sidebar.number_input("Std Divisor", value=float(saved_config.get("uni_div", 23.0)))
 msr_div = st.sidebar.number_input("MSR Divisor", value=float(saved_config.get("msr_div", 25.0)))
 round_val = st.sidebar.selectbox("Rounding", [1, 5, 10, 0], index=1)
 
-# --- SIDEBAR: 2. DESTINATION CITIES ---
-st.sidebar.markdown("---")
 st.sidebar.header("2. Cities")
-cities_list_raw = st.sidebar.text_area("City List (One per line)", value=saved_config.get("cities_list", ""), height=120)
+cities_list_raw = st.sidebar.text_area("City List", value=saved_config.get("cities_list", ""), height=120)
 active_cities = [c.strip() for c in cities_list_raw.split("\n") if c.strip()]
 
 # --- SMART MILEAGE ENGINE ---
@@ -104,7 +94,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_secure_v1'}
+        headers = {'User-Agent': 'lumber_hub_secure_v2'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -117,14 +107,16 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
+# --- NEW FORMATTED CALCULATION ENGINE ---
+def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s, return_df=False):
     combined_list = []
     if inc_m: combined_list.append(df_m)
     if inc_s: combined_list.append(df_s)
     if not combined_list: return None
     combined = pd.concat(combined_list)
     combined = combined[pd.to_numeric(combined['FOB Price'], errors='coerce') > 0]
-    rows = []
+    
+    calc_rows = []
     for _, r in combined.iterrows():
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
         avail, ship = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt'))
@@ -137,11 +129,15 @@ def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s):
             div = msr_div if "MSR" in prod.upper() else uni_div
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
-            rows.append(f"{prod[:28]:<28} {avail[:10]:<10} {ship[:10]:<10} ${p:>7}")
-    if rows:
-        header = f"{'PRODUCT':<28} {'AVAIL':<10} {'SHIP':<10} {'PRICE':>8}"
-        return f"QUOTE: {city.upper()}\n{header}\n{'-'*60}\n" + "\n".join(rows)
-    return None
+            calc_rows.append({"Product": prod, "Avail": avail, "Ship": ship, "Delivered": f"${p:,.2f}"})
+    
+    if not calc_rows: return None
+    
+    res_df = pd.DataFrame(calc_rows)
+    if return_df: return res_df
+    
+    # Generate Markdown Table for display
+    return f"### Quote: {city.upper()}\n" + res_df.to_markdown(index=False)
 
 # --- UI TABS ---
 tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bulk Market", "👥 Cloud CRM"])
@@ -165,8 +161,10 @@ with tab_pricing:
         if not target_city: st.error("Add cities in the sidebar first.")
         else:
             with st.spinner(f"Pricing {target_city}..."):
-                res = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
-                if res: st.text_area("Single Output", value=res, height=300)
+                res_markdown = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if res_markdown: 
+                    st.markdown(res_markdown)
+                    st.code(res_markdown, language="markdown") # For easy copy-paste
 
 with tab_bulk:
     st.header("Bulk Distribution Generator")
@@ -177,13 +175,14 @@ with tab_bulk:
             progress = st.progress(0)
             for i, city in enumerate(active_cities):
                 st.write(f"Calculating {city}...")
-                q = run_calculation(city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
-                if q: bulk_output.append(q + "\n\n")
+                q_markdown = run_calculation(city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if q_markdown: bulk_output.append(q_markdown + "\n\n---\n\n")
                 progress.progress((i+1)/len(active_cities))
+            
             if bulk_output:
                 final_bulk = "".join(bulk_output)
-                st.text_area("Full Market Output", final_bulk, height=500)
-                st.download_button("Download Market Sheet", final_bulk, file_name="Full_Quote.txt")
+                st.markdown(final_bulk)
+                st.download_button("Download Market Sheet", final_bulk, file_name="Market_Quote.md")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
@@ -200,19 +199,18 @@ with tab_customers:
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("🚀 PREPARE DRAFT"):
                     with st.spinner("Pricing..."):
-                        q = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
-                        if q and "QUOTE:" in q:
+                        q_markdown = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
+                        if q_markdown:
                             email_addr = str(c_row.get('Buyer Email', ''))
-                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q)}"
+                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q_markdown)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
-                        else: st.error("No valid rates for this location.")
 
     with col_dir:
         edited_crm = st.data_editor(
             profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"]),
             use_container_width=True, num_rows="dynamic", key="crm_edit_ui",
             column_order=("Company Name", "Location", "Notes", "Buyer Email"),
-            column_config={"profile_name": None, "email": None, "Buyer Email": st.column_config.TextColumn("Buyer Email")}
+            column_config={"profile_name": None, "Buyer Email": st.column_config.TextColumn("Buyer Email")}
         )
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
@@ -228,21 +226,17 @@ with tab_customers:
 # --- SIDEBAR: CLOUD MANAGEMENT ---
 st.sidebar.markdown("---")
 col_save, col_del = st.sidebar.columns(2)
-
 if col_save.button("☁️ SAVE"):
-    if len(user_pin) < 4:
-        st.sidebar.error("Please set a 4-digit PIN before saving.")
+    if len(user_pin) < 4: st.sidebar.error("Set a 4-digit PIN first.")
     else:
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Profiles")
         config = {
-            "pin": user_pin, # Save the PIN into the config bundle
-            "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
+            "pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, 
             "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div,
             "round_to": round_val, "cities_list": cities_list_raw,
-            "master_data": df_master.fillna("").to_dict('records'), 
-            "spec_data": df_spec.fillna("").to_dict('records')
+            "master_data": df_master.fillna("").to_dict('records'), "spec_data": df_spec.fillna("").to_dict('records')
         }
         profiles_data = ws.get_all_records()
         found_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
