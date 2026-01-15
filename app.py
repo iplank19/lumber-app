@@ -114,7 +114,6 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_o
     combined = pd.concat(combined_list)
     combined = combined[pd.to_numeric(combined['FOB Price'], errors='coerce') > 0]
     
-    # App display uses spaces; Outlook uses '---' rails to prevent compression
     sep = " --- " if for_outlook else "    "
     
     rows = []
@@ -203,6 +202,9 @@ with tab_customers:
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
         st.subheader("📬 Quick Email")
+        # --- DAILY BLURB SECTION ---
+        daily_blurb = st.text_area("Daily Blurb / Market Update", help="Type a message to include at the top of the email quote.")
+        
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
@@ -212,7 +214,13 @@ with tab_customers:
                         q_outlook = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True, for_outlook=True)
                         if q_outlook:
                             email_addr = str(c_row.get('Buyer Email', ''))
-                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Lumber Quote - {cust_name}')}&body={urllib.parse.quote(q_outlook)}"
+                            
+                            # Combine Blurb + Quote
+                            full_body = q_outlook
+                            if daily_blurb:
+                                full_body = f"{daily_blurb}\n\n{q_outlook}"
+                            
+                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Lumber Quote - {cust_name}')}&body={urllib.parse.quote(full_body)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
