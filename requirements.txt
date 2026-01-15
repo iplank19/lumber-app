@@ -4,3 +4,4 @@ st-gsheets-connection
 requests
 gspread
 google-auth
+tabulate
