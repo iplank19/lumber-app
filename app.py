@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: State-Locked Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Quota-Proof Desk", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -22,8 +22,7 @@ def get_gspread_client():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     return gspread.authorize(creds)
 
-# --- SESSION STATE INITIALIZATION ---
-# This prevents the "Wipe to Default" bug by locking data into the browser session
+# --- SESSION STATE INITIALIZATION (The Fix for 429 Errors) ---
 if "master_data" not in st.session_state:
     st.session_state.master_data = None
 if "spec_data" not in st.session_state:
@@ -33,12 +32,13 @@ if "crm_data" not in st.session_state:
 if "active_profile_name" not in st.session_state:
     st.session_state.active_profile_name = ""
 
-# --- DATA LOADING ---
+# --- CACHED DATA FETCHING ---
 @st.cache_data(ttl=600)
-def fetch_raw_profiles():
+def fetch_profiles_once():
+    # Only reads the profile list once every 10 mins
     return conn.read(worksheet="Profiles")
 
-df_profiles = fetch_raw_profiles()
+df_profiles = fetch_profiles_once()
 profile_list = df_profiles["profile_name"].unique().tolist() if not df_profiles.empty else ["Default"]
 
 # --- SIDEBAR: PROFILE & SECURITY ---
@@ -46,10 +46,11 @@ st.sidebar.header("📁 Cloud Profile Manager")
 selected_profile = st.sidebar.selectbox("Select Active Profile", profile_list)
 current_profile = selected_profile.strip()
 
-# If user switches profiles, force a state reset to load new data
+# Reset state if user switches profiles
 if st.session_state.active_profile_name != current_profile:
     st.session_state.master_data = None
     st.session_state.spec_data = None
+    st.session_state.crm_data = None
     st.session_state.active_profile_name = current_profile
 
 user_pin = st.sidebar.text_input("Enter 4-Digit PIN", type="password")
@@ -66,10 +67,10 @@ if current_profile in df_profiles["profile_name"].values:
         is_locked = False
 
 if is_locked:
-    st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
+    st.error("🔒 Profile Locked. Enter PIN to prevent unauthorized API calls.")
     st.stop()
 
-# Load specific profile data into state if empty
+# Initialize data into state only if it's missing
 if st.session_state.master_data is None:
     st.session_state.master_data = saved_config.get("master_data", [])
 if st.session_state.spec_data is None:
@@ -98,25 +99,27 @@ st.sidebar.header("2. Engine Cities")
 cities_list_raw = st.sidebar.text_area("Master City List", value=saved_config.get("cities_list", ""), height=120)
 active_cities = sorted(list(set([c.strip() for c in cities_list_raw.split("\n") if c.strip()])))
 
-# --- MILEAGE ENGINE ---
+# --- MILEAGE ENGINE (Optimized) ---
 @st.cache_data(ttl=3600)
-def get_cached_mileage():
+def fetch_mileage_cache():
     return conn.read(worksheet="Mileage")
 
 def get_miles(origin, destination):
     if not origin or not destination: return None
     lane_key = f"{origin.strip().upper()} to {destination.strip().upper()}"
-    m_df = get_cached_mileage()
+    m_df = fetch_mileage_cache()
     if not m_df.empty and lane_key in m_df['lane_key'].values:
         return float(m_df[m_df['lane_key'] == lane_key]['miles'].values[0])
     
-    time.sleep(1.2)
+    # Sleep to avoid hitting 429 during multiple lookups
+    time.sleep(1.5)
     try:
-        headers = {'User-Agent': 'lumber_hub_v19'}
+        headers = {'User-Agent': 'lumber_hub_v20'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
         miles = round(requests.get(r_url).json()['routes'][0]['distance'] * 0.000621371, 2)
+        
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Mileage")
@@ -187,9 +190,11 @@ with tab_bulk:
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
+    
+    # Load CRM into session state once
     if st.session_state.crm_data is None:
         try:
-            st.session_state.crm_data = conn.read(worksheet="CRM", ttl=300).fillna("")
+            st.session_state.crm_data = conn.read(worksheet="CRM", ttl=600).fillna("")
         except:
             st.session_state.crm_data = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"])
     
@@ -207,7 +212,7 @@ with tab_customers:
                 loc_list = [l.strip() for l in str(c_row['Location']).split(';') if l.strip()]
                 if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
-                    # Update local state immediately
+                    # Update local state immediately without API call
                     st.session_state.crm_data.loc[(st.session_state.crm_data['profile_name'] == current_profile) & (st.session_state.crm_data['Company Name'] == cust_name), "Last Quoted"] = ts
                     multi_q = []
                     df_full = pd.concat([df_master_ui, df_spec_ui])
@@ -224,49 +229,54 @@ with tab_customers:
                         column_config={"Location": st.column_config.TextColumn("Locations (Use ; to separate)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
         if st.button("💾 SAVE CRM & SYNC CITIES"):
-            with st.spinner("Pushing to Cloud..."):
-                gc = get_gspread_client()
-                sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-                ws_crm = sh.worksheet("CRM")
-                edited_crm['profile_name'] = current_profile
-                # Merge logic
-                final_crm = pd.concat([st.session_state.crm_data[st.session_state.crm_data['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
-                ws_crm.clear()
-                ws_crm.update([final_crm.columns.values.tolist()] + final_crm.values.tolist())
-                
-                # Update Session State so the change is instant
-                st.session_state.crm_data = final_crm
-                st.success("CRM Synced!")
-                time.sleep(1)
-                st.rerun()
+            with st.spinner("Batch Syncing..."):
+                try:
+                    gc = get_gspread_client()
+                    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+                    ws_crm = sh.worksheet("CRM")
+                    edited_crm['profile_name'] = current_profile
+                    # Merge local edits with existing cloud data
+                    final_crm = pd.concat([st.session_state.crm_data[st.session_state.crm_data['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
+                    ws_crm.clear()
+                    ws_crm.update([final_crm.columns.values.tolist()] + final_crm.values.tolist())
+                    
+                    # Update Session State to match
+                    st.session_state.crm_data = final_crm
+                    st.success("CRM Synced Locally and in Cloud!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Save Failed: {e}")
 
 # --- SIDEBAR: SAVE PROFILE ---
 st.sidebar.markdown("---")
 if st.sidebar.button("☁️ SAVE PROFILE"):
     with st.spinner("Saving..."):
-        gc = get_gspread_client()
-        sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-        ws_prof = sh.worksheet("Profiles")
-        
-        # Sync Master Data back to state
-        st.session_state.master_data = df_master_ui.to_dict('records')
-        st.session_state.spec_data = df_spec_ui.to_dict('records')
-        
-        config = {
-            "pin": user_pin, "states": states_input, "rates": rates_input, 
-            "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, 
-            "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, 
-            "daily_blurb": daily_blurb, 
-            "master_data": st.session_state.master_data, 
-            "spec_data": st.session_state.spec_data
-        }
-        
-        profiles_data = ws_prof.get_all_records()
-        f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
-        if f_row != -1: ws_prof.update_cell(f_row, 2, json.dumps(config))
-        else: ws_prof.append_row([current_profile, json.dumps(config)])
-        
-        st.sidebar.success("Profile Saved!")
-        st.cache_data.clear() # Only clear cache for the next login, don't wipe session state
-        time.sleep(1)
-        st.rerun()
+        try:
+            gc = get_gspread_client()
+            sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+            ws_prof = sh.worksheet("Profiles")
+            
+            # Commit UI data back to session state before saving
+            st.session_state.master_data = df_master_ui.to_dict('records')
+            st.session_state.spec_data = df_spec_ui.to_dict('records')
+            
+            config = {
+                "pin": user_pin, "states": states_input, "rates": rates_input, 
+                "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, 
+                "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, 
+                "daily_blurb": daily_blurb, 
+                "master_data": st.session_state.master_data, 
+                "spec_data": st.session_state.spec_data
+            }
+            
+            profiles_data = ws_prof.get_all_records()
+            f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
+            if f_row != -1: ws_prof.update_cell(f_row, 2, json.dumps(config))
+            else: ws_prof.append_row([current_profile, json.dumps(config)])
+            
+            st.sidebar.success("Profile Saved!")
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Quota error. Wait 60s. {e}")
