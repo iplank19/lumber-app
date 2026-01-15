@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Outlook Rail Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Secure Cloud Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -92,7 +92,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_outlook_rails_v1'}
+        headers = {'User-Agent': 'lumber_hub_final_v4'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -105,7 +105,7 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- HYBRID CALCULATION ENGINE (Space vs Rails) ---
+# --- HYBRID CALCULATION ENGINE ---
 def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_outlook=False):
     combined_list = []
     if inc_m: combined_list.append(df_master)
@@ -114,7 +114,7 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_o
     combined = pd.concat(combined_list)
     combined = combined[pd.to_numeric(combined['FOB Price'], errors='coerce') > 0]
     
-    # App display uses spaces; Outlook uses the "Rail" --- to prevent compression
+    # App display uses spaces; Outlook uses '---' rails to prevent compression
     sep = " --- " if for_outlook else "    "
     
     rows = []
@@ -132,10 +132,8 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_o
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
             
             if for_outlook:
-                # Rails for Outlook
                 line = f"{prod[:28]:<28}{sep}{avail[:10]:<10}{sep}{ship[:10]:<10}{sep}${p:>8,.2f}"
             else:
-                # Traditional Spaces for App Display
                 line = f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
             rows.append(line)
     
@@ -195,8 +193,11 @@ with tab_bulk:
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
-    try: crm_all = conn.read(worksheet="CRM")
-    except: crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"])
+    try: 
+        crm_all = conn.read(worksheet="CRM")
+    except: 
+        crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"])
+    
     profile_crm = crm_all[crm_all['profile_name'] == current_profile]
     
     col_dir, col_prep = st.columns([2, 1])
@@ -208,7 +209,6 @@ with tab_customers:
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("🚀 PREPARE EMAIL"):
                     with st.spinner("Pricing..."):
-                        # THIS LINE INJECTS THE --- RAILS FOR OUTLOOK ONLY
                         q_outlook = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True, for_outlook=True)
                         if q_outlook:
                             email_addr = str(c_row.get('Buyer Email', ''))
@@ -223,15 +223,28 @@ with tab_customers:
             column_config={"profile_name": None, "Buyer Email": st.column_config.TextColumn("Buyer Email")}
         )
         if st.button("💾 SAVE CRM"):
-            gc = get_gspread_client()
-            sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-            ws = sh.worksheet("CRM")
-            edited_crm['profile_name'] = current_profile
-            final_crm = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).fillna("")
-            ws.clear()
-            ws.update([final_crm.columns.values.tolist()] + final_crm.astype(str).values.tolist())
-            st.success("CRM Synced!")
-            st.cache_data.clear(); time.sleep(1); st.rerun()
+            with st.spinner("Syncing to Cloud..."):
+                try:
+                    gc = get_gspread_client()
+                    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+                    ws = sh.worksheet("CRM")
+                    
+                    edited_crm['profile_name'] = current_profile
+                    current_edits_clean = edited_crm.fillna("")
+                    other_profiles_data = crm_all[crm_all['profile_name'] != current_profile].fillna("")
+                    
+                    final_combined_crm = pd.concat([other_profiles_data, current_edits_clean], ignore_index=True)
+                    final_crm_data = final_combined_crm.astype(str)
+                    
+                    ws.clear()
+                    data_matrix = [final_crm_data.columns.values.tolist()] + final_crm_data.values.tolist()
+                    ws.update(data_matrix)
+                    
+                    st.success("CRM Successfully Synced!")
+                    st.cache_data.clear()
+                    time.sleep(1); st.rerun()
+                except Exception as e:
+                    st.error(f"Cloud Sync Error: {e}")
 
 # --- SIDEBAR: SAVE & DELETE ---
 st.sidebar.markdown("---")
