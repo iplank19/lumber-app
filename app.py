@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Ultimate Regional Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Smart Splitter", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -92,7 +92,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v14'}
+        headers = {'User-Agent': 'lumber_hub_v15'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -188,18 +188,17 @@ with tab_customers:
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 
-                # --- DETECTION LOGIC ---
+                # --- FIXED DETECTION LOGIC ---
                 locs_raw = str(c_row['Location'])
-                # If there's a comma, it's multi. If not, loc_list will just have 1 item.
-                loc_list = [l.strip() for l in locs_raw.split(',') if l.strip()]
+                # We now split by SEMICOLON (;) instead of COMMA (,)
+                loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
                 if len(loc_list) > 1:
-                    st.success(f"📍 Multi-Site Detected: {len(loc_list)} Cities")
+                    st.success(f"📍 Multi-Site Detected: {len(loc_list)} Branches")
                 else:
-                    st.info(f"📍 Single-Site Detected: {loc_list[0]}")
+                    st.info(f"📍 Single-Site: {loc_list[0]}")
                 
-                # Preview cities to the user
-                st.caption(f"Targeting: {', '.join(loc_list)}")
+                st.caption(f"Pricing for: {', '.join(loc_list)}")
 
                 if st.button(f"Generate Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
@@ -217,17 +216,18 @@ with tab_customers:
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        # We use the full dataframe for the editor to ensure "Location" is saved as a simple text string
         edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_final", 
                         column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                        column_config={"Location": st.column_config.TextColumn("Location(s)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
+                        column_config={
+                            "Location": st.column_config.TextColumn("Locations (Use ; to separate sites)"), 
+                            "Last Quoted": st.column_config.TextColumn(disabled=True)
+                        })
         
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
             ws = sh.worksheet("CRM")
             edited_crm['profile_name'] = current_profile
-            # Standard merge and overwrite
             final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
             ws.clear()
             ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
