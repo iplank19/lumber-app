@@ -107,7 +107,7 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- CALCULATION ENGINE (MARKDOWN TABLE RETURN) ---
+# --- UPDATED CALC ENGINE (FOR OUTLOOK COMPATIBILITY) ---
 def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, return_df=False):
     combined_list = []
     if inc_m: combined_list.append(df_master)
@@ -135,7 +135,7 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, retur
     res_df = pd.DataFrame(calc_rows)
     if return_df: return res_df
     
-    # Return formatted Markdown Table
+    # FORMAT: Markdown table (preserves columns better in most apps)
     return f"### Quote: {city.upper()}\n\n" + res_df.to_markdown(index=False)
 
 # --- UI TABS ---
@@ -163,6 +163,7 @@ with tab_pricing:
                 res_markdown = run_calculation(target_city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
                 if res_markdown: 
                     st.markdown(res_markdown)
+                    st.info("💡 Copy the block below and paste into Outlook. Outlook will automatically align the columns.")
                     st.code(res_markdown, language="markdown")
 
 with tab_bulk:
@@ -200,6 +201,7 @@ with tab_customers:
                         q_md = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True)
                         if q_md:
                             email_addr = str(c_row.get('Buyer Email', ''))
+                            # URL encoding the markdown for mailto
                             mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q_md)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
