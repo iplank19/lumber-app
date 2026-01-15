@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Smart Splitter", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Regional Trading Desk", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -92,7 +92,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v15'}
+        headers = {'User-Agent': 'lumber_hub_v16'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -183,24 +183,24 @@ with tab_customers:
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
         st.subheader("📬 Prepare Quote")
+        # BLURB PORTION RESTORED
+        daily_blurb = st.text_area("Daily Blurb / Market Update", value=saved_config.get("daily_blurb", ""))
+        
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 
-                # --- FIXED DETECTION LOGIC ---
+                # --- SEMICOLON SPLITTER ---
                 locs_raw = str(c_row['Location'])
-                # We now split by SEMICOLON (;) instead of COMMA (,)
                 loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
                 if len(loc_list) > 1:
-                    st.success(f"📍 Multi-Site Detected: {len(loc_list)} Branches")
+                    st.success(f"📍 Regional Account: {len(loc_list)} Sites")
                 else:
-                    st.info(f"📍 Single-Site: {loc_list[0]}")
-                
-                st.caption(f"Pricing for: {', '.join(loc_list)}")
+                    st.info(f"📍 Single-Site Account")
 
-                if st.button(f"Generate Outlook Draft"):
+                if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     
@@ -211,17 +211,17 @@ with tab_customers:
                         q = run_calculation(city, df_full, rate_map, round_val, True)
                         if q: multi_q_output.append(q)
                     
-                    final_body = "\n\n---\n\n".join(multi_q_output)
-                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
+                    # Merge Blurb + Quotes
+                    quotes_text = "\n\n---\n\n".join(multi_q_output)
+                    final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
+                    
+                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote: {cust_name}&body={urllib.parse.quote(final_body)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
         edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_final", 
                         column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                        column_config={
-                            "Location": st.column_config.TextColumn("Locations (Use ; to separate sites)"), 
-                            "Last Quoted": st.column_config.TextColumn(disabled=True)
-                        })
+                        column_config={"Location": st.column_config.TextColumn("Locations (Use ; to separate sites)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
@@ -239,7 +239,8 @@ if st.sidebar.button("☁️ SAVE PROFILE"):
     gc = get_gspread_client()
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
-    config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
+    # Included daily_blurb in config for cloud persistence
+    config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "daily_blurb": daily_blurb, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
     profiles_data = ws.get_all_records()
     f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
     if f_row != -1: ws.update_cell(f_row, 2, json.dumps(config))
