@@ -58,26 +58,24 @@ if is_locked:
     st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
     st.stop()
 
-# --- APP HEALTH: QUOTA & REFRESH (QOL 3) ---
+# --- APP HEALTH: QUOTA & REFRESH ---
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ App Health")
 
-# Cell Quota Gauge
 try:
     all_data = conn.read(worksheet="CRM")
     cell_count = all_data.size
-    quota_pct = min(cell_count / 100000, 1.0) # Using 100k as a "soft" warning limit
+    quota_pct = min(cell_count / 100000, 1.0)
     st.sidebar.write(f"Cloud Cell Usage:")
     st.sidebar.progress(quota_pct)
     st.sidebar.caption(f"{cell_count:,} / 10,000,000 cells used")
 except: pass
 
-# Hard Refresh
 if st.sidebar.button("🔄 Sync Now (Hard Refresh)"):
     st.cache_data.clear()
     st.rerun()
 
-# --- SIDEBAR: FREIGHT & SETTINGS ---
+# --- FREIGHT SETTINGS ---
 st.sidebar.markdown("---")
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
@@ -112,7 +110,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v9'}
+        headers = {'User-Agent': 'lumber_hub_v10'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -125,7 +123,7 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- PRICING ENGINE (QOL 1) ---
+# --- CALC ENGINE ---
 def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
     if "Include" in df_combined.columns:
         df_combined = df_combined[df_combined["Include"] == True]
@@ -137,7 +135,6 @@ def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
         avail, ship, stock = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt')), str(r.get('Stock', 'High'))
         
-        # Inventory Status logic [QOL 1]
         stock_note = ""
         if stock == "Low": stock_note = " (LTD)"
         elif stock == "Out": stock_note = " (SO)"
@@ -159,31 +156,39 @@ def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
     divider = "=" * len(header) if for_outlook else "-" * 66
     return f"Quote: {city.upper()}\n\n{header}\n{divider}\n" + "\n".join(rows)
 
-# --- UI TABS ---
+# --- PRICING LOGIC ---
 tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bulk Market", "👥 Cloud CRM"])
 
 with tab_pricing:
     st.header(f"Workspace: {current_profile}")
     
-    # Trend Tracking & Select All (QOL 1)
+    # Pre-process Trend Tracking with Type Guards
+    def calculate_trend(current_price, product_name, prev_map):
+        try:
+            curr = float(current_price)
+            prev = float(prev_map.get(product_name, curr))
+            if curr > prev: return f"+{curr - prev:.0f}"
+            if curr < prev: return f"-{prev - curr:.0f}"
+            return "—"
+        except: return "—"
+
     prev_m = {r['Product']: r['FOB Price'] for r in saved_config.get("master_data", []) if 'Product' in r}
     prev_s = {r['Product']: r['FOB Price'] for r in saved_config.get("spec_data", []) if 'Product' in r}
 
-    def prep_df(data, prev_map, rows):
+    def prep_df_safe(data, prev_map, rows):
         df = pd.DataFrame(data) if data else pd.DataFrame({"Include": [True]*rows, "Product": [""]*rows, "FOB Price": [0.0]*rows, "Origin": [""]*rows, "Stock": ["High"]*rows, "Availability": ["Prompt"]*rows, "Ship Time": ["Prompt"]*rows})
-        if "Trend" not in df.columns:
-            df['Trend'] = df.apply(lambda x: f"+{float(x['FOB Price'])-prev_map.get(x['Product'], x['FOB Price']):.0f}" if x['Product'] in prev_map and float(x['FOB Price']) > prev_map[x['Product']] else (f"-{prev_map.get(x['Product'], x['FOB Price'])-float(x['FOB Price']):.0f}" if x['Product'] in prev_map and float(x['FOB Price']) < prev_map[x['Product']] else "—"), axis=1)
+        if "Include" not in df.columns: df.insert(0, "Include", True)
+        # Apply Trend with the Type Guard function
+        df['Trend'] = df.apply(lambda x: calculate_trend(x['FOB Price'], x['Product'], prev_map), axis=1)
         return df
 
     c_m1, c_m2 = st.columns(2)
     with c_m1:
         st.subheader("Standard Master")
-        if st.button("Check All Standard"): saved_config['master_data'] = [dict(r, Include=True) for r in saved_config.get('master_data', [])]
-        df_master_ui = st.data_editor(prep_df(saved_config.get("master_data"), prev_m, 15), use_container_width=True, num_rows="dynamic", key="m_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
+        df_master_ui = st.data_editor(prep_df_safe(saved_config.get("master_data"), prev_m, 15), use_container_width=True, num_rows="dynamic", key="m_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
     with c_m2:
         st.subheader("Specialty Master")
-        if st.button("Check All Specialty"): saved_config['spec_data'] = [dict(r, Include=True) for r in saved_config.get('spec_data', [])]
-        df_spec_ui = st.data_editor(prep_df(saved_config.get("spec_data"), prev_s, 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
+        df_spec_ui = st.data_editor(prep_df_safe(saved_config.get("spec_data"), prev_s, 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
 
     st.markdown("---")
     target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
@@ -192,7 +197,7 @@ with tab_pricing:
         if res: st.code(res, language="text")
 
 with tab_bulk:
-    st.header("Bulk Market Sheets (QOL 4)")
+    st.header("Bulk Market Sheets")
     cat_filter = st.multiselect("Surgical Category Filter", ["2x4", "2x6", "MSR", "#1", "#2"], default=[])
     
     if st.button("🚀 RUN FILTERED MARKET SHEET"):
@@ -224,7 +229,6 @@ with tab_customers:
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("Prepare Email"):
-                    # Last Quoted Timestamp
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     q = run_calculation(c_row['Location'], pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val, True)
@@ -232,7 +236,6 @@ with tab_customers:
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        # Verified City Suggestions [QOL 2]
         atlas_cities = []
         try: atlas_cities = conn.read(worksheet="Mileage")['lane_key'].str.split(' to ').str[-1].unique().tolist()
         except: pass
@@ -256,7 +259,10 @@ if st.sidebar.button("☁️ SAVE PROFILE"):
     gc = get_gspread_client()
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
-    config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
+    # Clean data to ensure FOB Price is numeric before saving
+    m_clean = df_master_ui.to_dict('records')
+    s_clean = df_spec_ui.to_dict('records')
+    config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "master_data": m_clean, "spec_data": s_clean}
     profiles_data = ws.get_all_records()
     f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
     if f_row != -1: ws.update_cell(f_row, 2, json.dumps(config))
