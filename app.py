@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Regional Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Ultimate Regional Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -58,7 +58,7 @@ if is_locked:
     st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
     st.stop()
 
-# --- SIDEBAR: FREIGHT & SETTINGS ---
+# --- SIDEBAR: SETTINGS ---
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
 d_states = saved_config.get("states", ["", "", "", "", "", ""]) 
@@ -92,7 +92,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v13'}
+        headers = {'User-Agent': 'lumber_hub_v14'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -143,22 +143,17 @@ tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bul
 
 with tab_pricing:
     st.header(f"Workspace: {current_profile}")
-    
     def prep_df_simple(data, rows):
         df = pd.DataFrame(data) if data else pd.DataFrame({"Include": [True]*rows, "Product": [""]*rows, "FOB Price": [0.0]*rows, "Origin": [""]*rows, "Stock": ["High"]*rows, "Availability": ["Prompt"]*rows, "Ship Time": ["Prompt"]*rows})
         if "Include" not in df.columns: df.insert(0, "Include", True)
         return df
-
     c_m1, c_m2 = st.columns(2)
     with c_m1:
         st.subheader("Standard Master")
-        if st.button("Check All Standard"): saved_config['master_data'] = [dict(r, Include=True) for r in saved_config.get('master_data', [])]
         df_master_ui = st.data_editor(prep_df_simple(saved_config.get("master_data"), 15), use_container_width=True, num_rows="dynamic", key="m_edit", column_config={"Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
     with c_m2:
         st.subheader("Specialty Master")
-        if st.button("Check All Specialty"): saved_config['spec_data'] = [dict(r, Include=True) for r in saved_config.get('spec_data', [])]
         df_spec_ui = st.data_editor(prep_df_simple(saved_config.get("spec_data"), 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
-
     st.markdown("---")
     target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
     if st.button("Generate Quote"):
@@ -187,18 +182,26 @@ with tab_customers:
     
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
-        st.subheader("📬 Prep Multi-Location Quote")
-        st.caption("Tip: In the CRM table, list multiple cities separated by commas (e.g. Dallas, Houston, Austin)")
+        st.subheader("📬 Prepare Quote")
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 
-                # Logic for Multi-Location Quoting
+                # --- DETECTION LOGIC ---
                 locs_raw = str(c_row['Location'])
+                # If there's a comma, it's multi. If not, loc_list will just have 1 item.
                 loc_list = [l.strip() for l in locs_raw.split(',') if l.strip()]
                 
-                if st.button(f"Prepare Quote for {len(loc_list)} Location(s)"):
+                if len(loc_list) > 1:
+                    st.success(f"📍 Multi-Site Detected: {len(loc_list)} Cities")
+                else:
+                    st.info(f"📍 Single-Site Detected: {loc_list[0]}")
+                
+                # Preview cities to the user
+                st.caption(f"Targeting: {', '.join(loc_list)}")
+
+                if st.button(f"Generate Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     
@@ -207,28 +210,28 @@ with tab_customers:
                     
                     for city in loc_list:
                         q = run_calculation(city, df_full, rate_map, round_val, True)
-                        if q:
-                            multi_q_output.append(q)
+                        if q: multi_q_output.append(q)
                     
                     final_body = "\n\n---\n\n".join(multi_q_output)
                     mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_regional", 
+        # We use the full dataframe for the editor to ensure "Location" is saved as a simple text string
+        edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_final", 
                         column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                        column_config={"Location": st.column_config.TextColumn("Locations (Comma Separated)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
+                        column_config={"Location": st.column_config.TextColumn("Location(s)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
             ws = sh.worksheet("CRM")
-            edited_df = st.session_state["crm_edit_regional"]["edited_rows"] # Accessing session state for clean save
-            # Note: For simplicity in this block, we use the standard save logic
-            # but ensure the 'Location' column is treated as a plain text string.
-            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], profile_crm], ignore_index=True).astype(str)
+            edited_crm['profile_name'] = current_profile
+            # Standard merge and overwrite
+            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
             ws.clear()
             ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
+            st.success("CRM Synced!")
             st.cache_data.clear(); st.rerun()
 
 # --- SIDEBAR: SAVE PROFILE ---
