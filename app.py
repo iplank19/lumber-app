@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Smart Dashboard", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Trading Desk", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -99,7 +99,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v11'}
+        headers = {'User-Agent': 'lumber_hub_v12'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -174,31 +174,14 @@ with tab_pricing:
 
 with tab_bulk:
     st.header("Bulk Market Sheets")
+    st.caption("Generates full market quotes for all cities in your list using all 'Included' inventory.")
     
-    # SMART CATEGORY FILTER (QOL 4)
-    df_full_inventory = pd.concat([df_master_ui, df_spec_ui])
-    # Extract unique words/categories from 'Product' column
-    unique_products = df_full_inventory['Product'].dropna().unique()
-    all_words = []
-    for p in unique_products:
-        all_words.extend([w.upper() for w in str(p).replace('x', ' x ').split() if len(w) > 1])
-    
-    # Filter for common industry terms to keep list clean
-    industry_keywords = ["MSR", "2x4", "2x6", "2x8", "2x10", "2x12", "#1", "#2", "#3", "#4", "PET", "STUD", "KD", "GRN", "HF", "DF"]
-    detected_cats = sorted(list(set([w for w in all_words if w in industry_keywords])))
-    
-    cat_filter = st.multiselect("Smart Filter (Detected in your sheets)", detected_cats)
-    
-    if st.button("🚀 RUN FILTERED MARKET SHEET"):
+    if st.button("🚀 RUN FULL MARKET SHEET"):
         bulk_output = []
-        df_filtered = df_full_inventory
-        if cat_filter:
-            # Filter rows where Product contains ANY of the selected keywords
-            pattern = '|'.join([f"\\b{c}\\b" for c in cat_filter])
-            df_filtered = df_full_inventory[df_full_inventory['Product'].str.contains(pattern, case=False, na=False)]
+        df_full_inventory = pd.concat([df_master_ui, df_spec_ui])
         
         for city in active_cities:
-            q = run_calculation(city, df_filtered, rate_map, round_val)
+            q = run_calculation(city, df_full_inventory, rate_map, round_val)
             if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
         if bulk_output: st.code("".join(bulk_output), language="text")
 
@@ -222,7 +205,7 @@ with tab_customers:
                 if st.button("Prepare Email"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
-                    q = run_calculation(c_row['Location'], df_full_inventory, rate_map, round_val, True)
+                    q = run_calculation(c_row['Location'], pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val, True)
                     mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote&body={urllib.parse.quote(q)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
