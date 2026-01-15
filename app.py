@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Regional Trading Desk", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Auto-Sync Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -77,9 +77,10 @@ uni_div = st.sidebar.number_input("Std Divisor", value=float(saved_config.get("u
 msr_div = st.sidebar.number_input("MSR Divisor", value=float(saved_config.get("msr_div", 25.0)))
 round_val = st.sidebar.selectbox("Rounding", [1, 5, 10, 0], index=1)
 
-st.sidebar.header("2. Cities")
-cities_list_raw = st.sidebar.text_area("City List", value=saved_config.get("cities_list", ""), height=120)
-active_cities = [c.strip() for c in cities_list_raw.split("\n") if c.strip()]
+# --- UPDATED CITY LIST LOGIC ---
+st.sidebar.header("2. Engine Cities")
+cities_list_raw = st.sidebar.text_area("Master City List", value=saved_config.get("cities_list", ""), height=120, help="CRM locations sync here automatically on save.")
+active_cities = sorted(list(set([c.strip() for c in cities_list_raw.split("\n") if c.strip()])))
 
 # --- MILEAGE ENGINE ---
 def get_miles(origin, destination):
@@ -92,7 +93,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v16'}
+        headers = {'User-Agent': 'lumber_hub_v17'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -109,18 +110,13 @@ def get_miles(origin, destination):
 def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
     if "Include" in df_combined.columns:
         df_combined = df_combined[df_combined["Include"] == True]
-    
     df_combined = df_combined[pd.to_numeric(df_combined['FOB Price'], errors='coerce') > 0]
     sep = " --- " if for_outlook else "    "
     rows = []
     for _, r in df_combined.iterrows():
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
         avail, ship, stock = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt')), str(r.get('Stock', 'High'))
-        
-        stock_note = ""
-        if stock == "Low": stock_note = " (LTD)"
-        elif stock == "Out": stock_note = " (SO)"
-
+        stock_note = " (LTD)" if stock == "Low" else (" (SO)" if stock == "Out" else "")
         rate = next((v for k, v in r_map.items() if k in origin), None)
         if rate is None: continue
         miles = get_miles(origin, city)
@@ -129,10 +125,8 @@ def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
             div = msr_div if "MSR" in prod.upper() else uni_div
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
-            
             line = f"{prod[:28] + stock_note:<28}{sep}{avail[:10]:<10}{sep}{ship[:10]:<10}{sep}${p:>8,.2f}" if for_outlook else f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
             rows.append(line)
-    
     if not rows: return None
     header = f"{'PRODUCT':<28}{sep}{'AVAIL':<10}{sep}{'SHIP':<10}{sep}{'DELIVERED':>9}" if for_outlook else f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
     divider = "=" * len(header) if for_outlook else "-" * 66
@@ -183,63 +177,66 @@ with tab_customers:
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
         st.subheader("📬 Prepare Quote")
-        # BLURB PORTION RESTORED
-        daily_blurb = st.text_area("Daily Blurb / Market Update", value=saved_config.get("daily_blurb", ""))
-        
+        daily_blurb = st.text_area("Daily Blurb", value=saved_config.get("daily_blurb", ""))
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
-                
-                # --- SEMICOLON SPLITTER ---
-                locs_raw = str(c_row['Location'])
-                loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
-                
-                if len(loc_list) > 1:
-                    st.success(f"📍 Regional Account: {len(loc_list)} Sites")
-                else:
-                    st.info(f"📍 Single-Site Account")
-
+                loc_list = [l.strip() for l in str(c_row['Location']).split(';') if l.strip()]
                 if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
-                    
                     multi_q_output = []
                     df_full = pd.concat([df_master_ui, df_spec_ui])
-                    
                     for city in loc_list:
                         q = run_calculation(city, df_full, rate_map, round_val, True)
                         if q: multi_q_output.append(q)
-                    
-                    # Merge Blurb + Quotes
                     quotes_text = "\n\n---\n\n".join(multi_q_output)
                     final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
-                    
                     mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote: {cust_name}&body={urllib.parse.quote(final_body)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
         edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_final", 
                         column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                        column_config={"Location": st.column_config.TextColumn("Locations (Use ; to separate sites)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
+                        column_config={"Location": st.column_config.TextColumn("Locations (Use ; to separate)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
-        if st.button("💾 SAVE CRM"):
-            gc = get_gspread_client()
-            sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-            ws = sh.worksheet("CRM")
-            edited_crm['profile_name'] = current_profile
-            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
-            ws.clear()
-            ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-            st.success("CRM Synced!")
-            st.cache_data.clear(); st.rerun()
+        if st.button("💾 SAVE CRM & SYNC CITIES"):
+            with st.spinner("Updating Cloud and Engine..."):
+                gc = get_gspread_client()
+                sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+                
+                # 1. Update CRM
+                ws_crm = sh.worksheet("CRM")
+                edited_crm['profile_name'] = current_profile
+                final_crm = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
+                ws_crm.clear()
+                ws_crm.update([final_crm.columns.values.tolist()] + final_crm.values.tolist())
+                
+                # 2. Extract Cities for Sync
+                crm_locations = edited_crm['Location'].tolist()
+                extracted_cities = []
+                for loc_str in crm_locations:
+                    extracted_cities.extend([l.strip() for l in str(loc_str).split(';') if l.strip()])
+                
+                # Merge with existing Sidebar cities (removing duplicates)
+                current_sidebar_cities = [c.strip() for c in cities_list_raw.split("\n") if c.strip()]
+                new_master_city_list = sorted(list(set(current_sidebar_cities + extracted_cities)))
+                updated_city_text = "\n".join(new_master_city_list)
+                
+                # 3. Update Profile Config (Saves the city list permanently)
+                ws_prof = sh.worksheet("Profiles")
+                config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": updated_city_text, "daily_blurb": daily_blurb, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
+                profiles_data = ws_prof.get_all_records()
+                f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
+                if f_row != -1: ws_prof.update_cell(f_row, 2, json.dumps(config))
+                
+                st.success("CRM Saved & Cities Synced to Engine!")
+                st.cache_data.clear(); st.rerun()
 
 # --- SIDEBAR: SAVE PROFILE ---
 if st.sidebar.button("☁️ SAVE PROFILE"):
-    gc = get_gspread_client()
-    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-    ws = sh.worksheet("Profiles")
-    # Included daily_blurb in config for cloud persistence
+    gc = get_gspread_client(); sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]); ws = sh.worksheet("Profiles")
     config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "daily_blurb": daily_blurb, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
     profiles_data = ws.get_all_records()
     f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
