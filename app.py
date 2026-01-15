@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Secure Cloud", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Outlook Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -56,7 +56,7 @@ else:
     is_locked = False
 
 if is_locked:
-    st.error("🔒 Profile Locked. Please enter the correct PIN in the sidebar.")
+    st.error("🔒 Profile Locked. Enter PIN in sidebar.")
     st.stop()
 
 # --- SIDEBAR: 1. FREIGHT RATES ---
@@ -94,7 +94,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_secure_v2'}
+        headers = {'User-Agent': 'lumber_hub_outlook_master_v1'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -107,7 +107,7 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- NEW FORMATTED CALCULATION ENGINE ---
+# --- OUTLOOK-READY CALCULATION ENGINE ---
 def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s, return_df=False):
     combined_list = []
     if inc_m: combined_list.append(df_m)
@@ -129,15 +129,17 @@ def run_calculation(city, df_m, df_s, r_map, r_rule, inc_m, inc_s, return_df=Fal
             div = msr_div if "MSR" in prod.upper() else uni_div
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
-            calc_rows.append({"Product": prod, "Avail": avail, "Ship": ship, "Delivered": f"${p:,.2f}"})
+            calc_rows.append({"Product": prod[:25], "Avail": avail[:10], "Ship": ship[:10], "Delivered": f"${p:,.2f}"})
     
     if not calc_rows: return None
-    
     res_df = pd.DataFrame(calc_rows)
     if return_df: return res_df
     
-    # Generate Markdown Table for display
-    return f"### Quote: {city.upper()}\n" + res_df.to_markdown(index=False)
+    # Text Grid Alignment (Outlook Style)
+    header = f"{'PRODUCT':<26} {'AVAIL':<11} {'SHIP':<11} {'DELIVERED':>10}"
+    divider = "-" * len(header)
+    body = [f"{row['Product']:<26} {row['Avail']:<11} {row['Ship']:<11} {row['Delivered']:>10}" for _, row in res_df.iterrows()]
+    return f"QUOTE: {city.upper()}\n\n{header}\n{divider}\n" + "\n".join(body)
 
 # --- UI TABS ---
 tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bulk Market", "👥 Cloud CRM"])
@@ -158,13 +160,15 @@ with tab_pricing:
     target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
     
     if st.button(f"Generate Single Quote", type="primary"):
-        if not target_city: st.error("Add cities in the sidebar first.")
+        if not target_city: st.error("Add cities in the sidebar.")
         else:
             with st.spinner(f"Pricing {target_city}..."):
-                res_markdown = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
-                if res_markdown: 
-                    st.markdown(res_markdown)
-                    st.code(res_markdown, language="markdown") # For easy copy-paste
+                res_grid = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if res_grid: 
+                    df_viz = run_calculation(target_city, df_master, df_spec, rate_map, round_val, inc_m, inc_s, return_df=True)
+                    st.table(df_viz) # Pretty visual table
+                    st.subheader("Copy Text for Email:")
+                    st.code(res_grid, language="text") # Clean Grid for Outlook
 
 with tab_bulk:
     st.header("Bulk Distribution Generator")
@@ -175,14 +179,13 @@ with tab_bulk:
             progress = st.progress(0)
             for i, city in enumerate(active_cities):
                 st.write(f"Calculating {city}...")
-                q_markdown = run_calculation(city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
-                if q_markdown: bulk_output.append(q_markdown + "\n\n---\n\n")
+                q_grid = run_calculation(city, df_master, df_spec, rate_map, round_val, inc_m, inc_s)
+                if q_grid: bulk_output.append(q_grid + "\n\n" + ("=" * 60) + "\n\n")
                 progress.progress((i+1)/len(active_cities))
-            
             if bulk_output:
                 final_bulk = "".join(bulk_output)
-                st.markdown(final_bulk)
-                st.download_button("Download Market Sheet", final_bulk, file_name="Market_Quote.md")
+                st.code(final_bulk, language="text")
+                st.download_button("Download Market Sheet", final_bulk, file_name="Market_Quote.txt")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
@@ -199,10 +202,10 @@ with tab_customers:
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("🚀 PREPARE DRAFT"):
                     with st.spinner("Pricing..."):
-                        q_markdown = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
-                        if q_markdown:
+                        q_grid = run_calculation(c_row['Location'], df_master, df_spec, rate_map, round_val, True, True)
+                        if q_grid:
                             email_addr = str(c_row.get('Buyer Email', ''))
-                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q_markdown)}"
+                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Quote - {cust_name}')}&body={urllib.parse.quote(q_grid)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
