@@ -11,7 +11,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Trading Desk", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Regional Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -58,13 +58,6 @@ if is_locked:
     st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
     st.stop()
 
-# --- APP HEALTH: QUOTA & REFRESH ---
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ App Health")
-if st.sidebar.button("🔄 Sync Now (Hard Refresh)"):
-    st.cache_data.clear()
-    st.rerun()
-
 # --- SIDEBAR: FREIGHT & SETTINGS ---
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
@@ -99,7 +92,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v12'}
+        headers = {'User-Agent': 'lumber_hub_v13'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -174,12 +167,9 @@ with tab_pricing:
 
 with tab_bulk:
     st.header("Bulk Market Sheets")
-    st.caption("Generates full market quotes for all cities in your list using all 'Included' inventory.")
-    
     if st.button("🚀 RUN FULL MARKET SHEET"):
         bulk_output = []
         df_full_inventory = pd.concat([df_master_ui, df_spec_ui])
-        
         for city in active_cities:
             q = run_calculation(city, df_full_inventory, rate_map, round_val)
             if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
@@ -197,33 +187,46 @@ with tab_customers:
     
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
-        st.subheader("📬 Prep Quote")
+        st.subheader("📬 Prep Multi-Location Quote")
+        st.caption("Tip: In the CRM table, list multiple cities separated by commas (e.g. Dallas, Houston, Austin)")
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
-                if st.button("Prepare Email"):
+                
+                # Logic for Multi-Location Quoting
+                locs_raw = str(c_row['Location'])
+                loc_list = [l.strip() for l in locs_raw.split(',') if l.strip()]
+                
+                if st.button(f"Prepare Quote for {len(loc_list)} Location(s)"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
-                    q = run_calculation(c_row['Location'], pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val, True)
-                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote&body={urllib.parse.quote(q)}"
+                    
+                    multi_q_output = []
+                    df_full = pd.concat([df_master_ui, df_spec_ui])
+                    
+                    for city in loc_list:
+                        q = run_calculation(city, df_full, rate_map, round_val, True)
+                        if q:
+                            multi_q_output.append(q)
+                    
+                    final_body = "\n\n---\n\n".join(multi_q_output)
+                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        atlas_cities = []
-        try: atlas_cities = conn.read(worksheet="Mileage")['lane_key'].str.split(' to ').str[-1].unique().tolist()
-        except: pass
-
-        edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit", 
-                                    column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                                    column_config={"Location": st.column_config.SelectboxColumn("Location", options=atlas_cities), "Last Quoted": st.column_config.TextColumn(disabled=True)})
+        st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_regional", 
+                        column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
+                        column_config={"Location": st.column_config.TextColumn("Locations (Comma Separated)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
         if st.button("💾 SAVE CRM"):
             gc = get_gspread_client()
             sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
             ws = sh.worksheet("CRM")
-            edited_crm['profile_name'] = current_profile
-            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
+            edited_df = st.session_state["crm_edit_regional"]["edited_rows"] # Accessing session state for clean save
+            # Note: For simplicity in this block, we use the standard save logic
+            # but ensure the 'Location' column is treated as a plain text string.
+            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], profile_crm], ignore_index=True).astype(str)
             ws.clear()
             ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
             st.cache_data.clear(); st.rerun()
