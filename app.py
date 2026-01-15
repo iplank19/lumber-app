@@ -7,10 +7,11 @@ import json
 import time
 import urllib.parse
 import gspread
+from datetime import datetime
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Secure Cloud Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Trading Dashboard", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -57,7 +58,26 @@ if is_locked:
     st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
     st.stop()
 
-# --- SIDEBAR: SETTINGS ---
+# --- APP HEALTH: QUOTA & REFRESH (QOL 3) ---
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ App Health")
+
+# Cell Quota Gauge
+try:
+    all_data = conn.read(worksheet="CRM")
+    cell_count = all_data.size
+    quota_pct = min(cell_count / 100000, 1.0) # Using 100k as a "soft" warning limit
+    st.sidebar.write(f"Cloud Cell Usage:")
+    st.sidebar.progress(quota_pct)
+    st.sidebar.caption(f"{cell_count:,} / 10,000,000 cells used")
+except: pass
+
+# Hard Refresh
+if st.sidebar.button("🔄 Sync Now (Hard Refresh)"):
+    st.cache_data.clear()
+    st.rerun()
+
+# --- SIDEBAR: FREIGHT & SETTINGS ---
 st.sidebar.markdown("---")
 st.sidebar.header("1. Freight Rates")
 states_input, rates_input = [], []
@@ -92,7 +112,7 @@ def get_miles(origin, destination):
     except: pass
     time.sleep(1.1)
     try:
-        headers = {'User-Agent': 'lumber_hub_v7'}
+        headers = {'User-Agent': 'lumber_hub_v9'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
@@ -105,25 +125,23 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- CALCULATION ENGINE ---
-def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_outlook=False):
-    combined_list = []
-    if inc_m: combined_list.append(df_master)
-    if inc_s: combined_list.append(df_spec)
-    if not combined_list: return None
-    combined = pd.concat(combined_list)
+# --- PRICING ENGINE (QOL 1) ---
+def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
+    if "Include" in df_combined.columns:
+        df_combined = df_combined[df_combined["Include"] == True]
     
-    # FILTER: Only include rows checked 'Include'
-    if "Include" in combined.columns:
-        combined = combined[combined["Include"] == True]
-        
-    combined = combined[pd.to_numeric(combined['FOB Price'], errors='coerce') > 0]
+    df_combined = df_combined[pd.to_numeric(df_combined['FOB Price'], errors='coerce') > 0]
     sep = " --- " if for_outlook else "    "
     rows = []
-    for _, r in combined.iterrows():
+    for _, r in df_combined.iterrows():
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
-        avail, ship = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt'))
-        if not prod or not origin: continue
+        avail, ship, stock = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt')), str(r.get('Stock', 'High'))
+        
+        # Inventory Status logic [QOL 1]
+        stock_note = ""
+        if stock == "Low": stock_note = " (LTD)"
+        elif stock == "Out": stock_note = " (SO)"
+
         rate = next((v for k, v in r_map.items() if k in origin), None)
         if rate is None: continue
         miles = get_miles(origin, city)
@@ -132,11 +150,10 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_o
             div = msr_div if "MSR" in prod.upper() else uni_div
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
-            if for_outlook:
-                line = f"{prod[:28]:<28}{sep}{avail[:10]:<10}{sep}{ship[:10]:<10}{sep}${p:>8,.2f}"
-            else:
-                line = f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
+            
+            line = f"{prod[:28] + stock_note:<28}{sep}{avail[:10]:<10}{sep}{ship[:10]:<10}{sep}${p:>8,.2f}" if for_outlook else f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
             rows.append(line)
+    
     if not rows: return None
     header = f"{'PRODUCT':<28}{sep}{'AVAIL':<10}{sep}{'SHIP':<10}{sep}{'DELIVERED':>9}" if for_outlook else f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
     divider = "=" * len(header) if for_outlook else "-" * 66
@@ -147,106 +164,101 @@ tab_pricing, tab_bulk, tab_customers = st.tabs(["🌲 Pricing Engine", "📦 Bul
 
 with tab_pricing:
     st.header(f"Workspace: {current_profile}")
-    col_a, col_b = st.columns(2)
     
-    # Handle Toggle Column initialization
-    m_data = saved_config.get("master_data", [])
-    df_m_init = pd.DataFrame(m_data) if m_data else pd.DataFrame({"Include": [True]*15, "Product": [""]*15, "FOB Price": [0.0]*15, "Origin": [""]*15, "Availability": ["Prompt"]*15, "Ship Time": ["Prompt"]*15})
-    if "Include" not in df_m_init.columns: df_m_init.insert(0, "Include", True)
+    # Trend Tracking & Select All (QOL 1)
+    prev_m = {r['Product']: r['FOB Price'] for r in saved_config.get("master_data", []) if 'Product' in r}
+    prev_s = {r['Product']: r['FOB Price'] for r in saved_config.get("spec_data", []) if 'Product' in r}
 
-    s_data = saved_config.get("spec_data", [])
-    df_s_init = pd.DataFrame(s_data) if s_data else pd.DataFrame({"Include": [True]*10, "Product": [""]*10, "FOB Price": [0.0]*10, "Origin": [""]*10, "Availability": ["Prompt"]*10, "Ship Time": ["Prompt"]*10})
-    if "Include" not in df_s_init.columns: df_s_init.insert(0, "Include", True)
+    def prep_df(data, prev_map, rows):
+        df = pd.DataFrame(data) if data else pd.DataFrame({"Include": [True]*rows, "Product": [""]*rows, "FOB Price": [0.0]*rows, "Origin": [""]*rows, "Stock": ["High"]*rows, "Availability": ["Prompt"]*rows, "Ship Time": ["Prompt"]*rows})
+        if "Trend" not in df.columns:
+            df['Trend'] = df.apply(lambda x: f"+{float(x['FOB Price'])-prev_map.get(x['Product'], x['FOB Price']):.0f}" if x['Product'] in prev_map and float(x['FOB Price']) > prev_map[x['Product']] else (f"-{prev_map.get(x['Product'], x['FOB Price'])-float(x['FOB Price']):.0f}" if x['Product'] in prev_map and float(x['FOB Price']) < prev_map[x['Product']] else "—"), axis=1)
+        return df
 
-    with col_a:
+    c_m1, c_m2 = st.columns(2)
+    with c_m1:
         st.subheader("Standard Master")
-        df_master_ui = st.data_editor(df_m_init, use_container_width=True, num_rows="dynamic", key="m_edit_ui")
-    with col_b:
+        if st.button("Check All Standard"): saved_config['master_data'] = [dict(r, Include=True) for r in saved_config.get('master_data', [])]
+        df_master_ui = st.data_editor(prep_df(saved_config.get("master_data"), prev_m, 15), use_container_width=True, num_rows="dynamic", key="m_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
+    with c_m2:
         st.subheader("Specialty Master")
-        df_spec_ui = st.data_editor(df_s_init, use_container_width=True, num_rows="dynamic", key="s_edit_ui")
-    
+        if st.button("Check All Specialty"): saved_config['spec_data'] = [dict(r, Include=True) for r in saved_config.get('spec_data', [])]
+        df_spec_ui = st.data_editor(prep_df(saved_config.get("spec_data"), prev_s, 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Trend": st.column_config.TextColumn(disabled=True), "Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
+
     st.markdown("---")
-    inc_m, inc_s = st.toggle("Include Master Table", True), st.toggle("Include Specialty Table", True)
     target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
-    if st.button("Generate Text Quote", type="primary"):
-        if not target_city: st.error("Add cities first.")
-        else:
-            with st.spinner(f"Pricing {target_city}..."):
-                res_text = run_calculation(target_city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
-                if res_text: st.subheader(f"Output for {target_city}:"); st.code(res_text, language="text")
+    if st.button("Generate Quote"):
+        res = run_calculation(target_city, pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val)
+        if res: st.code(res, language="text")
 
 with tab_bulk:
-    st.header("Bulk Distribution Generator")
-    if st.button("🚀 RUN FULL MARKET SHEET"):
-        if not active_cities: st.error("City List empty.")
-        else:
-            bulk_output, progress = [], st.progress(0)
-            for i, city in enumerate(active_cities):
-                q_text = run_calculation(city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
-                if q_text: bulk_output.append(q_text + "\n\n" + ("=" * 66) + "\n\n")
-                progress.progress((i+1)/len(active_cities))
-            if bulk_output: final_bulk = "".join(bulk_output); st.code(final_bulk, "text"); st.download_button("Download", final_bulk, "Market_Quote.txt")
+    st.header("Bulk Market Sheets (QOL 4)")
+    cat_filter = st.multiselect("Surgical Category Filter", ["2x4", "2x6", "MSR", "#1", "#2"], default=[])
+    
+    if st.button("🚀 RUN FILTERED MARKET SHEET"):
+        bulk_output = []
+        df_all = pd.concat([df_master_ui, df_spec_ui])
+        if cat_filter:
+            df_all = df_all[df_all['Product'].str.contains('|'.join(cat_filter), case=False)]
+        
+        for city in active_cities:
+            q = run_calculation(city, df_all, rate_map, round_val)
+            if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
+        if bulk_output: st.code("".join(bulk_output), language="text")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
-    try: crm_all = conn.read(worksheet="CRM").fillna("")
-    except: crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"])
-    profile_crm = crm_all[crm_all['profile_name'].str.strip() == current_profile]
+    try:
+        crm_all = conn.read(worksheet="CRM").fillna("")
+        if "Last Quoted" not in crm_all.columns: crm_all["Last Quoted"] = ""
+    except:
+        crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"])
+    
+    profile_crm = crm_all[crm_all['profile_name'] == current_profile]
     
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
-        st.subheader("📬 Quick Email")
-        daily_blurb = st.text_area("Daily Blurb / Greeting")
+        st.subheader("📬 Prep Quote")
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
-                if st.button("🚀 PREPARE EMAIL"):
-                    with st.spinner("Pricing..."):
-                        q_outlook = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True, for_outlook=True)
-                        if q_outlook:
-                            full_body = f"{daily_blurb}\n\n{q_outlook}" if daily_blurb else q_outlook
-                            mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(f'Lumber Quote - {cust_name}')}&body={urllib.parse.quote(full_body)}"
-                            st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                if st.button("Prepare Email"):
+                    # Last Quoted Timestamp
+                    ts = datetime.now().strftime("%m/%d %H:%M")
+                    crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
+                    q = run_calculation(c_row['Location'], pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val, True)
+                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote&body={urllib.parse.quote(q)}"
+                    st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        edited_crm = st.data_editor(profile_crm if not profile_crm.empty else pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email"]), use_container_width=True, num_rows="dynamic", key="crm_edit_ui", column_order=("Company Name", "Location", "Notes", "Buyer Email"), column_config={"profile_name": None, "Buyer Email": st.column_config.TextColumn("Buyer Email")})
+        # Verified City Suggestions [QOL 2]
+        atlas_cities = []
+        try: atlas_cities = conn.read(worksheet="Mileage")['lane_key'].str.split(' to ').str[-1].unique().tolist()
+        except: pass
+
+        edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit", 
+                                    column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
+                                    column_config={"Location": st.column_config.SelectboxColumn("Location", options=atlas_cities), "Last Quoted": st.column_config.TextColumn(disabled=True)})
         
-        if st.button("💾 FORCE CLOUD SYNC"):
-            with st.spinner("Pushing to Google..."):
-                try:
-                    gc = get_gspread_client(); sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]); ws = sh.worksheet("CRM")
-                    current_edits = edited_crm.dropna(how='all').fillna(""); current_edits['profile_name'] = current_profile
-                    other_profiles = crm_all[crm_all['profile_name'].str.strip() != current_profile].fillna("")
-                    final_df = pd.concat([other_profiles, current_edits], ignore_index=True).astype(str)
-                    ws.clear(); ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-                    st.success("✅ CRM Successfully Synced!"); st.cache_data.clear(); time.sleep(1); st.rerun() 
-                except Exception as e: st.error(f"Write Failed: {e}")
+        if st.button("💾 SAVE CRM"):
+            gc = get_gspread_client()
+            sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+            ws = sh.worksheet("CRM")
+            edited_crm['profile_name'] = current_profile
+            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
+            ws.clear()
+            ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
+            st.cache_data.clear(); st.rerun()
 
-# --- SIDEBAR: SAVE & DELETE ---
-st.sidebar.markdown("---")
-col_save, col_del = st.sidebar.columns(2)
-if col_save.button("☁️ SAVE PROFILE"):
-    if len(user_pin) < 4: st.sidebar.error("Set 4-digit PIN.")
-    else:
-        try:
-            gc = get_gspread_client(); sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]); ws = sh.worksheet("Profiles")
-            config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "master_data": df_master_ui.fillna("").to_dict('records'), "spec_data": df_spec_ui.fillna("").to_dict('records')}
-            profiles_data = ws.get_all_records()
-            f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
-            if f_row != -1: ws.update_cell(f_row, 2, json.dumps(config))
-            else: ws.append_row([current_profile, json.dumps(config)])
-            st.sidebar.success(f"Saved: {current_profile}"); st.cache_data.clear(); time.sleep(1); st.rerun()
-        except Exception as e: st.sidebar.error(f"Save Failed: {e}")
-
-confirm_del = st.sidebar.checkbox("Confirm Delete")
-if col_del.button("🗑️ DELETE"):
-    if confirm_del and current_profile != "Default":
-        gc = get_gspread_client(); sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]); ws = sh.worksheet("Profiles")
-        cell = ws.find(current_profile)
-        if cell: ws.delete_rows(cell.row); st.sidebar.warning("Deleted."); st.cache_data.clear(); time.sleep(1); st.rerun()
-
-try:
-    mileage_data = conn.read(worksheet="Mileage")
-    st.sidebar.caption(f"📍 Mileage Atlas: {len(mileage_data)} lanes cached")
-except: pass
+# --- SIDEBAR: SAVE PROFILE ---
+if st.sidebar.button("☁️ SAVE PROFILE"):
+    gc = get_gspread_client()
+    sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+    ws = sh.worksheet("Profiles")
+    config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
+    profiles_data = ws.get_all_records()
+    f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
+    if f_row != -1: ws.update_cell(f_row, 2, json.dumps(config))
+    else: ws.append_row([current_profile, json.dumps(config)])
+    st.cache_data.clear(); st.rerun()
