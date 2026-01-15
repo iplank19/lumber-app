@@ -10,7 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- APP UI SETUP ---
-st.set_page_config(page_title="Lumber Hub: Text Master", layout="wide")
+st.set_page_config(page_title="Lumber Hub: Secure Cloud Master", layout="wide")
 
 # --- CONNECTIONS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -48,13 +48,15 @@ if current_profile in df_profiles["profile_name"].values:
     config_str = df_profiles[df_profiles["profile_name"] == current_profile]["config_json"].values[0]
     saved_config = json.loads(config_str)
     correct_pin = str(saved_config.get("pin", ""))
+    # Unlock if PIN matches or if no PIN was previously set
     if not correct_pin or user_pin == correct_pin:
         is_locked = False
 else:
+    # Unlock for brand new profiles so they can be set up
     is_locked = False
 
 if is_locked:
-    st.error("🔒 Profile Locked. Enter PIN in sidebar.")
+    st.error("🔒 Profile Locked. Enter correct PIN in sidebar.")
     st.stop()
 
 # --- SIDEBAR: SETTINGS ---
@@ -90,13 +92,16 @@ def get_miles(origin, destination):
         if not mileage_df.empty and lane_key in mileage_df['lane_key'].values:
             return float(mileage_df[mileage_df['lane_key'] == lane_key]['miles'].values[0])
     except: pass
-    time.sleep(1.1)
+
+    time.sleep(1.1) # Nominatim compliance
     try:
-        headers = {'User-Agent': 'lumber_hub_text_v1'}
+        headers = {'User-Agent': 'lumber_hub_final_v3'}
         res_a = requests.get(f"https://nominatim.openstreetmap.org/search?q={origin.strip()}&format=json&limit=1", headers=headers).json()
         res_b = requests.get(f"https://nominatim.openstreetmap.org/search?q={destination.strip()}&format=json&limit=1", headers=headers).json()
         r_url = f"http://router.project-osrm.org/route/v1/driving/{res_a[0]['lon']},{res_a[0]['lat']};{res_b[0]['lon']},{res_b[0]['lat']}?overview=false"
         miles = round(requests.get(r_url).json()['routes'][0]['distance'] * 0.000621371, 2)
+        
+        # Log to Cloud Atlas
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         ws = sh.worksheet("Mileage")
@@ -105,8 +110,8 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- TEXT GRID ENGINE ---
-def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s):
+# --- HYBRID CALCULATION ENGINE (Space-Aligned vs Tab-Separated) ---
+def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s, for_outlook=False):
     combined_list = []
     if inc_m: combined_list.append(df_master)
     if inc_s: combined_list.append(df_spec)
@@ -114,10 +119,9 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s):
     combined = pd.concat(combined_list)
     combined = combined[pd.to_numeric(combined['FOB Price'], errors='coerce') > 0]
     
-    # Building the Grid
-    header = f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
-    divider = "-" * 66
     rows = []
+    # Outlook strips multiple spaces, so we use Tabs for the Outlook button link
+    sep = "\t" if for_outlook else "    "
     
     for _, r in combined.iterrows():
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
@@ -131,11 +135,22 @@ def run_calculation(city, df_master, df_spec, r_map, r_rule, inc_m, inc_s):
             div = msr_div if "MSR" in prod.upper() else uni_div
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
-            # Alignment Logic: Left-aligned text columns, right-aligned price
-            line = f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
+            
+            if for_outlook:
+                line = f"{prod[:30]}{sep}{avail[:12]}{sep}{ship[:12]}{sep}${p:>9,.2f}"
+            else:
+                line = f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
             rows.append(line)
     
     if not rows: return None
+    
+    if for_outlook:
+        header = f"PRODUCT{sep}AVAIL{sep}SHIP{sep}DELIVERED"
+        divider = "-" * 40 # Tabs make dividers tricky in emails
+    else:
+        header = f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
+        divider = "-" * 66
+        
     return f"Quote: {city.upper()}\n\n{header}\n{divider}\n" + "\n".join(rows)
 
 # --- UI TABS ---
@@ -160,10 +175,12 @@ with tab_pricing:
         if not target_city: st.error("Add cities in the sidebar first.")
         else:
             with st.spinner(f"Pricing {target_city}..."):
-                res_text = run_calculation(target_city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
+                # Always show the Space-Aligned version in the app (monospaced)
+                res_text = run_calculation(target_city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s, for_outlook=False)
                 if res_text:
                     st.subheader(f"Output for {target_city}:")
-                    st.code(res_text, language="text") # This box is the primary tool now
+                    st.info("💡 High-alignment grid: Best for manual copy-pasting.")
+                    st.code(res_text, language="text")
 
 with tab_bulk:
     st.header("Bulk Distribution Generator")
@@ -173,13 +190,13 @@ with tab_bulk:
             bulk_output = []
             progress = st.progress(0)
             for i, city in enumerate(active_cities):
-                q_text = run_calculation(city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s)
+                q_text = run_calculation(city, df_master_ui, df_spec_ui, rate_map, round_val, inc_m, inc_s, for_outlook=False)
                 if q_text: bulk_output.append(q_text + "\n\n" + ("=" * 66) + "\n\n")
                 progress.progress((i+1)/len(active_cities))
             if bulk_output:
                 final_bulk = "".join(bulk_output)
                 st.code(final_bulk, language="text")
-                st.download_button("Download Market Sheet", final_bulk, file_name="Market_Quote.txt")
+                st.download_button("Download Market Sheet", final_bulk, file_name="Full_Market_Quote.txt")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
@@ -196,10 +213,11 @@ with tab_customers:
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
                 if st.button("🚀 PREPARE EMAIL"):
                     with st.spinner("Pricing..."):
-                        q_text = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True)
-                        if q_text:
+                        # Use Tab-Separated version for the "Open in Outlook" link
+                        q_outlook = run_calculation(c_row['Location'], df_master_ui, df_spec_ui, rate_map, round_val, True, True, for_outlook=True)
+                        if q_outlook:
                             email_addr = str(c_row.get('Buyer Email', ''))
-                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Lumber Quote - {cust_name}')}&body={urllib.parse.quote(q_text)}"
+                            mailto = f"mailto:{email_addr}?subject={urllib.parse.quote(f'Lumber Quote - {cust_name}')}&body={urllib.parse.quote(q_outlook)}"
                             st.markdown(f'<a href="{mailto}" target="_blank" style="text-decoration:none;"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
@@ -224,7 +242,7 @@ with tab_customers:
 st.sidebar.markdown("---")
 col_save, col_del = st.sidebar.columns(2)
 if col_save.button("☁️ SAVE"):
-    if len(user_pin) < 4: st.sidebar.error("Set PIN first.")
+    if len(user_pin) < 4: st.sidebar.error("Set 4-digit PIN first.")
     else:
         gc = get_gspread_client()
         sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
