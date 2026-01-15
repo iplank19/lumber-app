@@ -172,26 +172,29 @@ with tab_bulk:
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
+    
+    # 1. LOAD CRM
     try:
         crm_all = conn.read(worksheet="CRM").fillna("")
-        if "Last Quoted" not in crm_all.columns: crm_all["Last Quoted"] = ""
-    except:
+        # Ensure correct columns exist
+        needed_cols = ["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"]
+        for col in needed_cols:
+            if col not in crm_all.columns: crm_all[col] = ""
+    except Exception as e:
         crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"])
     
-    profile_crm = crm_all[crm_all['profile_name'] == current_profile]
+    # Filter for active profile
+    profile_crm = crm_all[crm_all['profile_name'] == current_profile].reset_index(drop=True)
     
     col_dir, col_prep = st.columns([2, 1])
     with col_prep:
         st.subheader("📬 Prepare Quote")
-        # BLURB PORTION RESTORED
         daily_blurb = st.text_area("Daily Blurb / Market Update", value=saved_config.get("daily_blurb", ""))
         
         if not profile_crm.empty:
             cust_name = st.selectbox("Select Customer", ["-- Select --"] + list(profile_crm["Company Name"].unique()))
             if cust_name != "-- Select --":
                 c_row = profile_crm[profile_crm["Company Name"] == cust_name].iloc[0]
-                
-                # --- SEMICOLON SPLITTER ---
                 locs_raw = str(c_row['Location'])
                 loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
@@ -202,6 +205,7 @@ with tab_customers:
 
                 if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
+                    # Update timestamp locally
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     
                     multi_q_output = []
@@ -211,35 +215,58 @@ with tab_customers:
                         q = run_calculation(city, df_full, rate_map, round_val, True)
                         if q: multi_q_output.append(q)
                     
-                    # Merge Blurb + Quotes
                     quotes_text = "\n\n---\n\n".join(multi_q_output)
                     final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
-                    
-                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote: {cust_name}&body={urllib.parse.quote(final_body)}"
+                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
                     st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
-        edited_crm = st.data_editor(profile_crm, use_container_width=True, num_rows="dynamic", key="crm_edit_final", 
-                        column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
-                        column_config={"Location": st.column_config.TextColumn("Locations (Use ; to separate sites)"), "Last Quoted": st.column_config.TextColumn(disabled=True)})
+        # 2. EDIT CRM (Fixed column order and usage)
+        edited_crm = st.data_editor(
+            profile_crm, 
+            use_container_width=True, 
+            num_rows="dynamic", 
+            key="crm_editor_v2", 
+            column_order=("Company Name", "Location", "Last Quoted", "Notes", "Buyer Email"),
+            column_config={
+                "Location": st.column_config.TextColumn("Locations (Use ; to separate)"), 
+                "Last Quoted": st.column_config.TextColumn("Last Quote", disabled=True),
+                "Buyer Email": st.column_config.TextColumn("Email")
+            }
+        )
         
         if st.button("💾 SAVE CRM"):
-            gc = get_gspread_client()
-            sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-            ws = sh.worksheet("CRM")
-            edited_crm['profile_name'] = current_profile
-            final_df = pd.concat([crm_all[crm_all['profile_name'] != current_profile], edited_crm], ignore_index=True).astype(str)
-            ws.clear()
-            ws.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-            st.success("CRM Synced!")
-            st.cache_data.clear(); st.rerun()
+            try:
+                gc = get_gspread_client()
+                sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+                ws = sh.worksheet("CRM")
+                
+                # Tag all rows in editor with current profile name
+                edited_crm['profile_name'] = current_profile
+                
+                # Combine with other profiles (keeping them untouched)
+                other_profiles_crm = crm_all[crm_all['profile_name'] != current_profile]
+                final_crm_df = pd.concat([other_profiles_crm, edited_crm], ignore_index=True)
+                
+                # Sanitize: Convert everything to string and remove empty rows
+                final_crm_df = final_crm_df[final_crm_df['Company Name'] != ""].astype(str)
+                
+                # Write to sheet
+                ws.clear()
+                ws.update([final_crm_df.columns.values.tolist()] + final_crm_df.values.tolist())
+                
+                st.success("CRM Synced to Cloud!")
+                time.sleep(1)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Save Failed: {e}")
 
 # --- SIDEBAR: SAVE PROFILE ---
 if st.sidebar.button("☁️ SAVE PROFILE"):
     gc = get_gspread_client()
     sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
     ws = sh.worksheet("Profiles")
-    # Included daily_blurb in config for cloud persistence
     config = {"pin": user_pin, "states": states_input, "rates": rates_input, "sh_threshold": sh_threshold, "sh_floor": sh_floor, "uni_div": uni_div, "msr_div": msr_div, "round_to": round_val, "cities_list": cities_list_raw, "daily_blurb": daily_blurb, "master_data": df_master_ui.to_dict('records'), "spec_data": df_spec_ui.to_dict('records')}
     profiles_data = ws.get_all_records()
     f_row = next((i + 2 for i, row in enumerate(profiles_data) if row['profile_name'] == current_profile), -1)
