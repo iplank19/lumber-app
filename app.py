@@ -147,6 +147,7 @@ with tab_pricing:
         df = pd.DataFrame(data) if data else pd.DataFrame({"Include": [True]*rows, "Product": [""]*rows, "FOB Price": [0.0]*rows, "Origin": [""]*rows, "Stock": ["High"]*rows, "Availability": ["Prompt"]*rows, "Ship Time": ["Prompt"]*rows})
         if "Include" not in df.columns: df.insert(0, "Include", True)
         return df
+    
     c_m1, c_m2 = st.columns(2)
     with c_m1:
         st.subheader("Standard Master")
@@ -154,21 +155,55 @@ with tab_pricing:
     with c_m2:
         st.subheader("Specialty Master")
         df_spec_ui = st.data_editor(prep_df_simple(saved_config.get("spec_data"), 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
+    
     st.markdown("---")
-    target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
+    
+    # --- FILTERS FOR SINGLE QUOTE ---
+    st.subheader("📝 Quick Quote Prep")
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    with fc1:
+        target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
+    with fc2:
+        inc_std = st.checkbox("Include Standard", value=True)
+    with fc3:
+        inc_spec = st.checkbox("Include Specialty", value=True)
+
     if st.button("Generate Quote"):
-        res = run_calculation(target_city, pd.concat([df_master_ui, df_spec_ui]), rate_map, round_val)
-        if res: st.code(res, language="text")
+        dfs_to_calc = []
+        if inc_std: dfs_to_calc.append(df_master_ui)
+        if inc_spec: dfs_to_calc.append(df_spec_ui)
+        
+        if dfs_to_calc:
+            res = run_calculation(target_city, pd.concat(dfs_to_calc), rate_map, round_val)
+            if res: st.code(res, language="text")
+        else:
+            st.warning("Please toggle at least one inventory type (Standard or Specialty).")
 
 with tab_bulk:
     st.header("Bulk Market Sheets")
+    
+    # --- FILTERS FOR BULK ---
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        bulk_std = st.checkbox("Bulk: Include Standard", value=True, key="bulk_std")
+    with bc2:
+        bulk_spec = st.checkbox("Bulk: Include Specialty", value=True, key="bulk_spec")
+        
     if st.button("🚀 RUN FULL MARKET SHEET"):
         bulk_output = []
-        df_full_inventory = pd.concat([df_master_ui, df_spec_ui])
-        for city in active_cities:
-            q = run_calculation(city, df_full_inventory, rate_map, round_val)
-            if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
-        if bulk_output: st.code("".join(bulk_output), language="text")
+        
+        inventory_list = []
+        if bulk_std: inventory_list.append(df_master_ui)
+        if bulk_spec: inventory_list.append(df_spec_ui)
+        
+        if inventory_list:
+            df_full_inventory = pd.concat(inventory_list)
+            for city in active_cities:
+                q = run_calculation(city, df_full_inventory, rate_map, round_val)
+                if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
+            if bulk_output: st.code("".join(bulk_output), language="text")
+        else:
+            st.warning("Select Standard, Specialty, or both to run the market sheet.")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
@@ -176,14 +211,12 @@ with tab_customers:
     # 1. LOAD CRM
     try:
         crm_all = conn.read(worksheet="CRM").fillna("")
-        # Ensure correct columns exist
         needed_cols = ["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"]
         for col in needed_cols:
             if col not in crm_all.columns: crm_all[col] = ""
-    except Exception as e:
+    except Exception:
         crm_all = pd.DataFrame(columns=["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"])
     
-    # Filter for active profile
     profile_crm = crm_all[crm_all['profile_name'] == current_profile].reset_index(drop=True)
     
     col_dir, col_prep = st.columns([2, 1])
@@ -198,30 +231,34 @@ with tab_customers:
                 locs_raw = str(c_row['Location'])
                 loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
-                if len(loc_list) > 1:
-                    st.success(f"📍 Regional Account: {len(loc_list)} Sites")
-                else:
-                    st.info(f"📍 Single-Site Account")
+                # CRM Quote Filter Toggles
+                qc1, qc2 = st.columns(2)
+                crm_std = qc1.checkbox("Outlook: Std", value=True)
+                crm_spec = qc2.checkbox("Outlook: Spec", value=True)
 
                 if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
-                    # Update timestamp locally
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     
                     multi_q_output = []
-                    df_full = pd.concat([df_master_ui, df_spec_ui])
+                    active_inv = []
+                    if crm_std: active_inv.append(df_master_ui)
+                    if crm_spec: active_inv.append(df_spec_ui)
                     
-                    for city in loc_list:
-                        q = run_calculation(city, df_full, rate_map, round_val, True)
-                        if q: multi_q_output.append(q)
-                    
-                    quotes_text = "\n\n---\n\n".join(multi_q_output)
-                    final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
-                    mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
-                    st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                    if active_inv:
+                        df_full = pd.concat(active_inv)
+                        for city in loc_list:
+                            q = run_calculation(city, df_full, rate_map, round_val, True)
+                            if q: multi_q_output.append(q)
+                        
+                        quotes_text = "\n\n---\n\n".join(multi_q_output)
+                        final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
+                        mailto = f"mailto:{c_row['Buyer Email']}?subject=Quote Request: {cust_name}&body={urllib.parse.quote(final_body)}"
+                        st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                    else:
+                        st.warning("Toggle Std or Spec.")
 
     with col_dir:
-        # 2. EDIT CRM (Fixed column order and usage)
         edited_crm = st.data_editor(
             profile_crm, 
             use_container_width=True, 
@@ -240,22 +277,13 @@ with tab_customers:
                 gc = get_gspread_client()
                 sh = gc.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
                 ws = sh.worksheet("CRM")
-                
-                # Tag all rows in editor with current profile name
                 edited_crm['profile_name'] = current_profile
-                
-                # Combine with other profiles (keeping them untouched)
                 other_profiles_crm = crm_all[crm_all['profile_name'] != current_profile]
                 final_crm_df = pd.concat([other_profiles_crm, edited_crm], ignore_index=True)
-                
-                # Sanitize: Convert everything to string and remove empty rows
                 final_crm_df = final_crm_df[final_crm_df['Company Name'] != ""].astype(str)
-                
-                # Write to sheet
                 ws.clear()
                 ws.update([final_crm_df.columns.values.tolist()] + final_crm_df.values.tolist())
-                
-                st.success("CRM Synced to Cloud!")
+                st.success("CRM Synced!")
                 time.sleep(1)
                 st.cache_data.clear()
                 st.rerun()
