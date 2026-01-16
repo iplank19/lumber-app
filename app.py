@@ -157,8 +157,6 @@ with tab_pricing:
         df_spec_ui = st.data_editor(prep_df_simple(saved_config.get("spec_data"), 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
     
     st.markdown("---")
-    
-    # --- FILTERS FOR SINGLE QUOTE ---
     st.subheader("📝 Quick Quote Prep")
     fc1, fc2, fc3 = st.columns([2, 1, 1])
     with fc1:
@@ -177,12 +175,10 @@ with tab_pricing:
             res = run_calculation(target_city, pd.concat(dfs_to_calc), rate_map, round_val)
             if res: st.code(res, language="text")
         else:
-            st.warning("Please toggle at least one inventory type (Standard or Specialty).")
+            st.warning("Please select at least one inventory type.")
 
 with tab_bulk:
     st.header("Bulk Market Sheets")
-    
-    # --- FILTERS FOR BULK ---
     bc1, bc2 = st.columns(2)
     with bc1:
         bulk_std = st.checkbox("Bulk: Include Standard", value=True, key="bulk_std")
@@ -191,7 +187,6 @@ with tab_bulk:
         
     if st.button("🚀 RUN FULL MARKET SHEET"):
         bulk_output = []
-        
         inventory_list = []
         if bulk_std: inventory_list.append(df_master_ui)
         if bulk_spec: inventory_list.append(df_spec_ui)
@@ -203,12 +198,10 @@ with tab_bulk:
                 if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
             if bulk_output: st.code("".join(bulk_output), language="text")
         else:
-            st.warning("Select Standard, Specialty, or both to run the market sheet.")
+            st.warning("Select inventory type to run the market sheet.")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
-    
-    # 1. LOAD CRM
     try:
         crm_all = conn.read(worksheet="CRM").fillna("")
         needed_cols = ["profile_name", "Company Name", "Location", "Notes", "Buyer Email", "Last Quoted"]
@@ -231,35 +224,34 @@ with tab_customers:
                 locs_raw = str(c_row['Location'])
                 loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
-                # CRM Quote Filter Toggles
                 qc1, qc2 = st.columns(2)
                 crm_std = qc1.checkbox("Outlook: Std", value=True)
                 crm_spec = qc2.checkbox("Outlook: Spec", value=True)
 
-if st.button(f"Open Outlook Draft"):
-    ts = datetime.now().strftime("%m/%d %H:%M")
-    # Update timestamp locally
-    crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
-    
-    multi_q_output = []
-    active_inv = []
-    if crm_std: active_inv.append(df_master_ui)
-    if crm_spec: active_inv.append(df_spec_ui)
-    
-    if active_inv:
-        df_full = pd.concat(active_inv)
-        for city in loc_list:
-            q = run_calculation(city, df_full, rate_map, round_val, True)
-            if q: multi_q_output.append(q)
-        
-        quotes_text = "\n\n---\n\n".join(multi_q_output)
-        final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
-        
-        # NEW SUBJECT LOGIC
-        email_subject = f"Lumber - {datetime.now().strftime('%m/%d/%y')}"
-        mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(final_body)}"
-        
-        st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                if st.button(f"Open Outlook Draft"):
+                    ts = datetime.now().strftime("%m/%d %H:%M")
+                    crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
+                    
+                    multi_q_output = []
+                    active_inv = []
+                    if crm_std: active_inv.append(df_master_ui)
+                    if crm_spec: active_inv.append(df_spec_ui)
+                    
+                    if active_inv:
+                        df_full = pd.concat(active_inv)
+                        for city in loc_list:
+                            q = run_calculation(city, df_full, rate_map, round_val, True)
+                            if q: multi_q_output.append(q)
+                        
+                        quotes_text = "\n\n---\n\n".join(multi_q_output)
+                        final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
+                        
+                        # UPDATED SUBJECT LOGIC
+                        email_subject = f"Lumber - {datetime.now().strftime('%m/%d/%y')}"
+                        mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(final_body)}"
+                        st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
+                    else:
+                        st.warning("Toggle Std or Spec.")
 
     with col_dir:
         edited_crm = st.data_editor(
