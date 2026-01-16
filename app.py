@@ -105,14 +105,14 @@ def get_miles(origin, destination):
         return miles
     except: return None
 
-# --- CALC ENGINE ---
-def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
+# --- CALC ENGINE (UPDATED FOR TABLES) ---
+def run_calculation_data(city, df_combined, r_map, r_rule):
     if "Include" in df_combined.columns:
         df_combined = df_combined[df_combined["Include"] == True]
     
     df_combined = df_combined[pd.to_numeric(df_combined['FOB Price'], errors='coerce') > 0]
-    sep = " --- " if for_outlook else "    "
-    rows = []
+    
+    table_data = []
     for _, r in df_combined.iterrows():
         prod, origin = str(r.get('Product', '')), str(r.get('Origin', '')).upper()
         avail, ship, stock = str(r.get('Availability', 'Prompt')), str(r.get('Ship Time', 'Prompt')), str(r.get('Stock', 'High'))
@@ -130,12 +130,23 @@ def run_calculation(city, df_combined, r_map, r_rule, for_outlook=False):
             raw_p = float(r['FOB Price']) + (cost / div)
             p = math.ceil(raw_p / r_rule) * r_rule if r_rule > 0 else round(raw_p, 2)
             
-            line = f"{prod[:28] + stock_note:<28}{sep}{avail[:10]:<10}{sep}{ship[:10]:<10}{sep}${p:>8,.2f}" if for_outlook else f"{prod[:30]:<30} {avail[:12]:<12} {ship[:12]:<12} ${p:>9,.2f}"
-            rows.append(line)
+            table_data.append({
+                "PRODUCT": prod + stock_note,
+                "AVAIL": avail,
+                "SHIP": ship,
+                "DELIVERED": p
+            })
     
-    if not rows: return None
-    header = f"{'PRODUCT':<28}{sep}{'AVAIL':<10}{sep}{'SHIP':<10}{sep}{'DELIVERED':>9}" if for_outlook else f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
-    divider = "=" * len(header) if for_outlook else "-" * 66
+    return pd.DataFrame(table_data)
+
+def format_text_quote(city, df_results):
+    if df_results.empty: return None
+    header = f"{'PRODUCT':<30} {'AVAIL':<12} {'SHIP':<12} {'DELIVERED':>10}"
+    divider = "-" * 66
+    rows = []
+    for _, r in df_results.iterrows():
+        line = f"{r['PRODUCT'][:30]:<30} {r['AVAIL'][:12]:<12} {r['SHIP'][:12]:<12} ${r['DELIVERED']:>9,.2f}"
+        rows.append(line)
     return f"Quote: {city.upper()}\n\n{header}\n{divider}\n" + "\n".join(rows)
 
 # --- UI TABS ---
@@ -147,7 +158,6 @@ with tab_pricing:
         df = pd.DataFrame(data) if data else pd.DataFrame({"Include": [True]*rows, "Product": [""]*rows, "FOB Price": [0.0]*rows, "Origin": [""]*rows, "Stock": ["High"]*rows, "Availability": ["Prompt"]*rows, "Ship Time": ["Prompt"]*rows})
         if "Include" not in df.columns: df.insert(0, "Include", True)
         return df
-    
     c_m1, c_m2 = st.columns(2)
     with c_m1:
         st.subheader("Standard Master")
@@ -157,48 +167,46 @@ with tab_pricing:
         df_spec_ui = st.data_editor(prep_df_simple(saved_config.get("spec_data"), 10), use_container_width=True, num_rows="dynamic", key="s_edit", column_config={"Stock": st.column_config.SelectboxColumn(options=["High", "Low", "Out"])})
     
     st.markdown("---")
-    st.subheader("📝 Quick Quote Prep")
-    fc1, fc2, fc3 = st.columns([2, 1, 1])
-    with fc1:
+    
+    # Selection Controls
+    col_sel, col_t1, col_t2 = st.columns([2,1,1])
+    with col_sel:
         target_city = st.selectbox("Quick Single Target", active_cities) if active_cities else None
-    with fc2:
-        inc_std = st.checkbox("Include Standard", value=True)
-    with fc3:
-        inc_spec = st.checkbox("Include Specialty", value=True)
+    with col_t1:
+        use_std = st.checkbox("Incl. Standard", value=True)
+    with col_t2:
+        use_spec = st.checkbox("Incl. Specialty", value=True)
 
     if st.button("Generate Quote"):
-        dfs_to_calc = []
-        if inc_std: dfs_to_calc.append(df_master_ui)
-        if inc_spec: dfs_to_calc.append(df_spec_ui)
+        inv_list = []
+        if use_std: inv_list.append(df_master_ui)
+        if use_spec: inv_list.append(df_spec_ui)
         
-        if dfs_to_calc:
-            res = run_calculation(target_city, pd.concat(dfs_to_calc), rate_map, round_val)
-            if res: st.code(res, language="text")
+        if inv_list:
+            df_res = run_calculation_data(target_city, pd.concat(inv_list), rate_map, round_val)
+            if not df_res.empty:
+                st.subheader(f"📍 {target_city.upper()} Delivered Sheet")
+                # CLEAN TABLE DISPLAY
+                st.table(df_res.style.format({"DELIVERED": "${:,.2f}"}))
+                
+                # COLLAPSIBLE TEXT BOX FOR COPYING
+                with st.expander("📋 Click for Plain Text (Outlook Copy)"):
+                    text_q = format_text_quote(target_city, df_res)
+                    st.code(text_q, language="text")
         else:
-            st.warning("Please select at least one inventory type.")
+            st.warning("Please select Standard or Specialty inventory.")
 
 with tab_bulk:
     st.header("Bulk Market Sheets")
-    bc1, bc2 = st.columns(2)
-    with bc1:
-        bulk_std = st.checkbox("Bulk: Include Standard", value=True, key="bulk_std")
-    with bc2:
-        bulk_spec = st.checkbox("Bulk: Include Specialty", value=True, key="bulk_spec")
-        
     if st.button("🚀 RUN FULL MARKET SHEET"):
         bulk_output = []
-        inventory_list = []
-        if bulk_std: inventory_list.append(df_master_ui)
-        if bulk_spec: inventory_list.append(df_spec_ui)
-        
-        if inventory_list:
-            df_full_inventory = pd.concat(inventory_list)
-            for city in active_cities:
-                q = run_calculation(city, df_full_inventory, rate_map, round_val)
-                if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
-            if bulk_output: st.code("".join(bulk_output), language="text")
-        else:
-            st.warning("Select inventory type to run the market sheet.")
+        df_full_inventory = pd.concat([df_master_ui, df_spec_ui])
+        for city in active_cities:
+            # We use a internal helper for bulk to keep it text-based
+            df_res = run_calculation_data(city, df_full_inventory, rate_map, round_val)
+            q = format_text_quote(city, df_res)
+            if q: bulk_output.append(q + "\n\n" + ("=" * 66) + "\n\n")
+        if bulk_output: st.code("".join(bulk_output), language="text")
 
 with tab_customers:
     st.header(f"Cloud CRM: {current_profile}")
@@ -224,34 +232,25 @@ with tab_customers:
                 locs_raw = str(c_row['Location'])
                 loc_list = [l.strip() for l in locs_raw.split(';') if l.strip()]
                 
-                qc1, qc2 = st.columns(2)
-                crm_std = qc1.checkbox("Outlook: Std", value=True)
-                crm_spec = qc2.checkbox("Outlook: Spec", value=True)
-
+                # Subject logic included per instructions
                 if st.button(f"Open Outlook Draft"):
                     ts = datetime.now().strftime("%m/%d %H:%M")
                     crm_all.loc[(crm_all['profile_name'] == current_profile) & (crm_all['Company Name'] == cust_name), "Last Quoted"] = ts
                     
                     multi_q_output = []
-                    active_inv = []
-                    if crm_std: active_inv.append(df_master_ui)
-                    if crm_spec: active_inv.append(df_spec_ui)
+                    df_full = pd.concat([df_master_ui, df_spec_ui])
                     
-                    if active_inv:
-                        df_full = pd.concat(active_inv)
-                        for city in loc_list:
-                            q = run_calculation(city, df_full, rate_map, round_val, True)
-                            if q: multi_q_output.append(q)
-                        
-                        quotes_text = "\n\n---\n\n".join(multi_q_output)
-                        final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
-                        
-                        # UPDATED SUBJECT LOGIC
-                        email_subject = f"Lumber - {datetime.now().strftime('%m/%d/%y')}"
-                        mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(final_body)}"
-                        st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
-                    else:
-                        st.warning("Toggle Std or Spec.")
+                    for city in loc_list:
+                        df_res = run_calculation_data(city, df_full, rate_map, round_val)
+                        q = format_text_quote(city, df_res)
+                        if q: multi_q_output.append(q)
+                    
+                    quotes_text = "\n\n---\n\n".join(multi_q_output)
+                    final_body = f"{daily_blurb}\n\n{quotes_text}" if daily_blurb else quotes_text
+                    
+                    email_subject = f"Lumber - {datetime.now().strftime('%m/%d/%y')}"
+                    mailto = f"mailto:{c_row['Buyer Email']}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(final_body)}"
+                    st.markdown(f'<a href="{mailto}" target="_blank"><div style="background-color:#0078d4;color:white;padding:15px;text-align:center;border-radius:8px;font-weight:bold;">OPEN IN OUTLOOK</div></a>', unsafe_allow_html=True)
 
     with col_dir:
         edited_crm = st.data_editor(
